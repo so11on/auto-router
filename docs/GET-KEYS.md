@@ -15,6 +15,7 @@ the goal of each step still tells you what to look for. **Never paste a key into
 | Claude through the **API** | Anthropic account with credits | pay per token | `ANTHROPIC_API_KEY` |
 | GPT through your **ChatGPT Plus/Pro subscription** | Codex CLI installed and logged in | your plan | none |
 | GPT through the **API** | OpenAI API account with credits | pay per token | `OPENAI_API_KEY` |
+| Models of your **paid GitHub Copilot** plan (Pro, Pro+, Business, Enterprise) | Copilot CLI installed and logged in | your plan (premium requests) | none |
 | Gemini (paid models + classifier) | Google key from a project **with** billing | pay per token | `GEMINI_API_KEY` |
 | Gemini free tier (last-resort fallback) | Google key from a project **without** billing | free, slow | `GEMINI_FREE_API_KEY` |
 | Free pool: Groq, OpenRouter, Mistral, Ollama Cloud, NVIDIA, Cloudflare | one free account each | free | `GROQ_API_KEY`, `OPENROUTER_API_KEY`, `MISTRAL_API_KEY`, `OLLAMA_API_KEY`, `NVIDIA_API_KEY`, `CLOUDFLARE_*` |
@@ -60,6 +61,18 @@ which signs in with your ChatGPT account and spends your plan's included allowan
 
 Then pick a routing profile that uses OpenAI: `node ar.mjs init --roots "<your code folder>" --profile E` (OpenAI + Gemini) or `F` (OpenAI + free pool). Re-running init keeps your `.env`.
 `!gpt`, `!gpt-max`, `!gpt-mini` always work as per-message pins once OpenAI is configured.
+
+## 2c. GitHub Copilot (paid plan) through the Copilot CLI — no key
+You keep using the Copilot **Chat window** exactly as before. The router additionally gets your plan's models as targets, through GitHub's own terminal tool (programmatic mode `copilot -p`).
+1. Needs a **paid** Copilot plan (the free plan is not enough). Check: `node ar.mjs detect` shows the plan; an organization admin can also disable the CLI.
+2. Install Node.js 22 or newer (https://nodejs.org), then: `npm install -g @github/copilot`  (alternatives: `winget install GitHub.Copilot` on Windows, `brew install --cask copilot-cli` on macOS/Linux).
+3. Run `copilot login`. A browser opens: sign in to GitHub; if your organization uses SSO, click **Authorize**. Without a browser: `copilot login --device-auth` (enter the code at https://github.com/login/device).
+4. See which models your plan offers: run `copilot`, type `/model`, read the names, exit.
+5. `node ar.mjs copilot --main <model id> --check` (uses one request), then `node ar.mjs copilot --mini <id> --main <id> --max <id>` (leave an id out to use the CLI's default).
+6. `node ar.mjs init --roots "<your code folder>" --profile auto` rebuilds the routing with Copilot included (keeps your `.env`), then `node ar.mjs down && node ar.mjs up`.
+
+Notes: each request spends your plan's **premium requests** (heavier models cost more of them; the CLI does not tell us how many are left, so the router cannot forecast this quota — watch GitHub's usage page).
+Do **not** put a classic personal access token (`ghp_…`) in the environment: the CLI refuses it; the bridge ignores `GH_TOKEN`/`GITHUB_TOKEN` and uses your `copilot login`.
 
 ## 3. Google Gemini (two different keys)
 
@@ -128,5 +141,7 @@ Traps we hit (do not repeat them):
 | `FAILS … 401` | Wrong key: copy it again from the provider's page (no spaces or quotes), save `.env`. |
 | `FAILS … 403` | Not allowed: brand-new Google/Cloudflare keys can take minutes; or the plan/project has no access. |
 | `works (rate limited now)` | The key is fine; you hit its rate limit at this moment. |
+
+Not sure what you already have? `node ar.mjs detect` lists the logged-in tools and plans on this computer.
 
 After adding or changing keys: `node ar.mjs omniroute` (free pool), `node ar.mjs openai …` (OpenAI), then `node ar.mjs down && node ar.mjs up`.

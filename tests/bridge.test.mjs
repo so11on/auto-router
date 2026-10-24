@@ -16,7 +16,8 @@ async function withBridge(fn) {
   const port = 4300 + Math.floor(Math.random() * 500);
   const child = spawn(process.execPath, [path.join(ROOT, "claude-bridge", "server.mjs")], {
     env: { ...process.env, BRIDGE_PORT: String(port), BRIDGE_KEY: "k", BRIDGE_ALLOWED_ROOTS: tmp, BRIDGE_STATE: path.join(tmp, "state.json"),
-      AUTO_ROUTER_DATA: path.join(tmp, "data"), CODEX_BIN: path.join(ROOT, "tests", "fake_codex.sh"), CODEX_MODEL_MAIN: "test-model" },
+      AUTO_ROUTER_DATA: path.join(tmp, "data"), CODEX_BIN: path.join(ROOT, "tests", "fake_codex.sh"), CODEX_MODEL_MAIN: "test-model",
+      COPILOT_BIN: path.join(ROOT, "tests", "fake_copilot.sh"), COPILOT_MODEL_MAIN: "cp-model", GH_TOKEN: "must-be-stripped" },
     stdio: "ignore" });
   for (let i = 0; i < 30; i++) { try { if ((await fetch(`http://127.0.0.1:${port}/healthz`)).ok) break; } catch {} await new Promise((r) => setTimeout(r, 100)); }
   try { return await fn({ port, ws, tmp }); } finally { child.kill(); fs.rmSync(tmp, { recursive: true, force: true }); }
@@ -66,10 +67,41 @@ test("codex route: usage limit -> HTTP 429 (no text) and broken stream (partial 
   });
 });
 
+test("copilot route: read-only vs agent flags, model flag, answer + footer, estimated usage", { skip }, async () => {
+  await withBridge(async ({ port, ws }) => {
+    const ask = async (extra, text = "hello") => (await (await post(port, { model: "copilot-code-main",
+      messages: [{ role: "system", content: ws }, { role: "user", content: text }], ...extra })).json());
+    const ro = await ask({});
+    const t1 = ro.choices[0].message.content;
+    assert.match(t1, /Copilot answer/);
+    assert.match(t1, /--model=cp-model/);
+    assert.match(t1, /--allow-tool=read/);
+    assert.ok(!t1.includes("--allow-tool=write"), "read-only must not allow writes");
+    assert.match(t1, /GitHub Copilot \(cp-model · read-only\)/);
+    assert.ok(ro.usage.total_tokens > 0);
+    const ag = await ask({ tools: [{ type: "function" }] }, "please EDITFILE");
+    const t2 = ag.choices[0].message.content;
+    assert.match(t2, /--allow-tool=write/);
+    assert.match(t2, /files changed: `copilot-edit\.txt`/);
+  });
+});
+
+test("copilot route: long prompts go through a file (and the file is removed), limits become 429, tokens are not inherited", { skip }, async () => {
+  await withBridge(async ({ port, ws }) => {
+    const long = "x".repeat(8000);
+    const r = await (await post(port, { model: "copilot-code-main", messages: [{ role: "system", content: ws }, { role: "user", content: long }] })).json();
+    assert.match(r.choices[0].message.content, /Copilot answer/);
+    const dir = path.join(ws, ".auto-router", "prompts");
+    assert.deepEqual(fs.existsSync(dir) ? fs.readdirSync(dir) : [], [], "temporary prompt file must be deleted");
+    const lim = await post(port, { model: "copilot-code-main", messages: [{ role: "system", content: ws }, { role: "user", content: "PREMIUMLIMIT" }] });
+    assert.equal(lim.status, 429);
+  });
+});
+
 test("model list includes both routes", { skip }, async () => {
   await withBridge(async ({ port }) => {
     const d = await (await fetch(`http://127.0.0.1:${port}/v1/models`, { headers: { authorization: "Bearer k" } })).json();
     const ids = d.data.map((m) => m.id);
-    for (const id of ["claude-code-opus", "codex-code-main", "codex-code-mini", "codex-code-max"]) assert.ok(ids.includes(id), id);
+    for (const id of ["claude-code-opus", "codex-code-main", "codex-code-mini", "codex-code-max", "copilot-code-mini", "copilot-code-main", "copilot-code-max"]) assert.ok(ids.includes(id), id);
   });
 });

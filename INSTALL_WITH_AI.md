@@ -31,17 +31,26 @@ node ar.mjs doctor
 `node` itself missing? Install Node.js ≥ 18 from https://nodejs.org first (ask), then continue.
 Fix every ✘ before going on: Docker must be installed **and running** (https://docs.docker.com/get-docker/). A `!` for the Claude CLI or VS Code `code` command is fine.
 
-## Step 2 — Interview the user (ask all of these in ONE message, then wait)
+## Step 2 — Find out which paid plans they have, then ask only what is left
+First detect (reads local logins only; prints no e-mails or keys):
+```sh
+node ar.mjs detect
+```
+It reports, per vendor, whether the command-line tool is installed and signed in, and the plan when the vendor shows it (Claude: `pro`/`max`; GitHub Copilot: `individual`, business…, free or paid).
+**Show the user the result in plain words and ask them to confirm or correct it** — a login can be on a free plan, and Plus vs Pro (ChatGPT) or Pro vs Pro+ (Copilot) is not always visible.
+
+Then ask all remaining questions in ONE message and wait:
 1. **Where do you keep your code?** (a folder path; several allowed). → `--roots`. This is the only place Claude Code is allowed to edit.
 2. **Which paid AI services do you use?**
    - *Claude:* a **subscription** (Pro/Max) used through the `claude` command → `--claude cli`; an **API key with credits** → `--claude api`; none → `--claude none`.
    - *OpenAI / ChatGPT:* a **ChatGPT Plus/Pro subscription** → used through the **Codex CLI** terminal tool (`--openai cli`); an **OpenAI API key with credits** (a separate product and bill — Plus does **not** include API) → `--openai api`; none → `--openai none`.
+   - *GitHub Copilot (paid: Pro, Pro+, Business, Enterprise):* its models can be used by the router through the **GitHub Copilot CLI** (`copilot -p`, GitHub's own programmatic mode) → `node ar.mjs copilot`. The free Copilot plan does not count. The user keeps chatting in the Copilot Chat window as always; the router just gets the Copilot models as extra targets.
    - *Google Gemini:* a key from a project **with billing**? (yes/no)
 3. **May their prompts go to free AI services that can log or train on them?** (Gemini free tier, OpenRouter free models, LLM7, NVIDIA trial.) If **no**: skip those providers (tell them Auto: Free will then have fewer models) and use `--no-llm7`.
 4. **Which free accounts will they create?** Groq, OpenRouter, Mistral, Ollama Cloud, NVIDIA (all optional; more = more resilient). Each takes ~2 minutes at the links printed by `init`.
 5. **Is it OK that Balanced/Smart can spend their money / Claude allowance?** (Auto: Free never does.)
 
-Pick the profile:
+Pick the routing. Easiest: **`--profile auto --families <list>`** builds it from what the user has — families are `claude`, `openai`, `copilot`, `gemini` (billed key), e.g. `--families claude,copilot,gemini`; without `--families` it uses `node ar.mjs detect`. Fixed profiles also exist:
 | Situation | `--profile` |
 |---|---|
 | Claude **and** a billed Gemini key | `A` |
@@ -54,7 +63,8 @@ Pick the profile:
 
 ## Step 3 — Create the configuration
 ```sh
-node ar.mjs init --roots "<folder(s) from question 1>" --profile <A|B|C|D|E|F> --claude <cli|api|none> --openai <cli|api|none>
+node ar.mjs init --roots "<folder(s) from question 1>" --profile auto --families <claude,openai,copilot,gemini subset> --claude <cli|api|none> --openai <cli|api|none>
+# or a fixed profile:  --profile <A|B|C|D|E|F>
 ```
 This creates `.env` (secrets generated for the user), activates the routing profile, and remembers the folder for the VS Code extension.
 Then walk the user through **`docs/GET-KEYS.md`** — it has numbered steps and links for every key (Claude, OpenAI/Codex, Gemini free and paid, Groq, OpenRouter, Mistral, Ollama Cloud, NVIDIA, Cloudflare, LLM7). Do one provider at a time, in their language; ask them to paste **only the keys they have** into `.env` and **save the file**. Check them all against the real providers:
@@ -93,6 +103,17 @@ node ar.mjs down && node ar.mjs up
 ```
 Never guess model ids: the `--check` call must answer. With the CLI route and no ids, Codex's own default model is used for all three tiers.
 
+## Step 5c — GitHub Copilot (only if the user has a paid plan)
+```sh
+npm install -g @github/copilot        # needs Node 22+; alternatives: winget install GitHub.Copilot / brew install --cask copilot-cli
+copilot login                         # browser; on a machine without one: copilot login --device-auth
+node ar.mjs copilot --main <model id> --check      # one real request; `copilot` then /model shows the ids the plan offers
+node ar.mjs copilot --mini <id> --main <id> --max <id>
+node ar.mjs down && node ar.mjs up
+```
+Never guess model ids. If the user does not know them, run `node ar.mjs copilot` without ids: the CLI's default model is used for all three tiers. Each check uses a Copilot request (premium models count against the monthly premium requests of the plan).
+Copilot's own models stay available in the Copilot Chat picker too; this step additionally lets **Auto: Balanced/Smart** choose them. Pins: `!copilot`, `!copilot-max`, `!copilot-mini`.
+
 ## Step 6 — VS Code
 ```sh
 node ar.mjs vscode
@@ -112,7 +133,7 @@ any failing upstream call. Then ask the user to send one easy and one hard quest
 `auto-router · auto-balanced → gemini-flash · … · ctx 3%` showing the model used.
 
 ## Step 8 — Hand over (tell the user)
-- **Choose a profile:** model picker in Copilot Chat. **Force a model:** write `!opus`, `!sonnet`, `!haiku`, `!gpt`, `!gpt-max`, `!pro`, `!flash`, `!deepseek`, `!gpt-oss` or `model:opus` (or "usando o Opus") in the message; a pin to something not configured is ignored with a note.
+- **Choose a profile:** model picker in Copilot Chat. **Force a model:** write `!opus`, `!sonnet`, `!haiku`, `!gpt`, `!gpt-max`, `!copilot`, `!copilot-max`, `!pro`, `!flash`, `!deepseek`, `!gpt-oss` or `model:opus` (or "usando o Opus") in the message; a pin to something not configured is ignored with a note.
 - **Commands:** `node ar.mjs up | down | status | logs | usage | keys | smoke`. The stack does not start by itself after a reboot: run `node ar.mjs up` first.
 - **Costs/privacy:** Balanced and Smart can spend their money or Claude allowance; Auto: Free cannot. Free providers may log prompts. Everything is local (127.0.0.1).
 - **Honest limits to mention:** developed and verified on macOS; Windows/Linux were not tested by the author. Mid-answer continuation works for streaming chat only. The "new chat" automation uses VS Code commands that are not officially documented; if it does not open a chat, the extension copies the continuation text to the clipboard.

@@ -46,4 +46,9 @@ models:
   gpt-main-api: {context: 128000, paid: true, quota: none}
   gpt-max-api:  {context: 128000, paid: true, quota: none}
 
+  # --- GitHub Copilot paid plan (Copilot CLI); premium-request allowance is not visible to us ---
+  copilot-mini: {context: 128000, quota: none}
+  copilot-main: {context: 128000, quota: none}
+  copilot-max:  {context: 128000, quota: none}
+
   test-flaky: {context: 32000, quota: none}

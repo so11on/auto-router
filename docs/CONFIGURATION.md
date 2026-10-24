@@ -23,6 +23,7 @@
 | `OPENAI_PRIMARY` | hook | `cli` (default: Codex CLI with your ChatGPT login, through the bridge) or `api` (OpenAI API key). |
 | `CODEX_MODEL_MINI`, `CODEX_MODEL_MAIN`, `CODEX_MODEL_MAX` | bridge | Model ids passed to `codex exec -m` for the cli route; empty = Codex's default. Written by `node ar.mjs openai`. |
 | `CODEX_BIN`, `CODEX_AGENT_SANDBOX` | bridge | Codex binary (default `codex`) and the sandbox used when a request carries tools (default `workspace-write`; requests without tools use `read-only`). |
+| `COPILOT_MODEL_MINI`, `COPILOT_MODEL_MAIN`, `COPILOT_MODEL_MAX`, `COPILOT_BIN` | bridge | Model ids passed to `copilot --model=` (empty = the CLI default) and the binary name. Written by `node ar.mjs copilot`. |
 | `CLAUDE_PRIMARY` | hook | `cli` (default, Claude Code bridge) or `api` (Anthropic API). |
 | `CLASSIFIER_MODEL` | hook | LiteLLM model string for classification (default `gemini/gemini-3.5-flash-lite`). |
 | `USAGE_FILE` | hook | Usage log path inside the container (default `/app/data/usage.jsonl`, mounted from `./data`). |
@@ -72,3 +73,6 @@ It is harmless when the fixture server is not running.
 `node ar.mjs openai` rewrites two marker-delimited blocks in `litellm/config.yaml` (`# >>> openai … # <<< openai` and `# >>> openai-fallbacks … # <<< openai-fallbacks`):
 `gpt-{mini,main,max}-cli` → the bridge (`openai/codex-code-{mini,main,max}`) and `gpt-{mini,main,max}-api` → `openai/<id you verified>`. Do not edit between the markers by hand;
 rerun the command instead. Routing tables refer to `gpt-mini`, `gpt-main`, `gpt-max` (no suffix); the hook appends `-cli`/`-api` from `OPENAI_PRIMARY`.
+
+## Copilot blocks in `config.yaml`
+`node ar.mjs copilot` rewrites the marker-delimited blocks `# >>> copilot … # <<< copilot` and `# >>> copilot-fallbacks … # <<< copilot-fallbacks` (models `copilot-mini|main|max` → the bridge). Routing tables name them without a suffix; there is only the CLI route.

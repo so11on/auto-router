@@ -30,6 +30,9 @@ Anything able to reach `127.0.0.1:4100` with the key can edit files in the allow
   legal page before relying on it; set `CLAUDE_PRIMARY=api` to avoid the question.
 - **ChatGPT plan.** OpenAI documents `codex exec` for non-interactive use and "Sign in with ChatGPT" for Codex, which spends the plan's included allowance. The bridge runs the official `codex` binary as you and never touches your tokens;
   whether OpenAI accepts a wrapper that drives it from another chat UI is not something we could verify. Use `OPENAI_PRIMARY=api` to avoid the question. ChatGPT Plus/Pro does **not** include API credit.
+- **GitHub Copilot.** The router calls the paid plan's models only through GitHub's own **Copilot CLI** (`copilot -p`, documented for scripting) signed in as the user. We deliberately did **not** build the other possible routes:
+  a VS Code extension that re-exports Copilot's language-model API over HTTP, or reverse-engineered "copilot proxy" projects — those are not supported by GitHub and their own READMEs warn that automated traffic can trigger abuse detection and suspend Copilot access.
+  Even with the CLI, bulk automated use is subject to GitHub's acceptable-use rules and to the plan's premium-request limits.
 - **Free tiers.** Each provider sets its own terms (some forbid relaying, some log prompts). OmniRoute marks risky ones
   (`tos: avoid`) and excludes them from `auto/*`. Prompts sent to free tiers (Gemini free tier, OpenRouter free models)
   may be used by the provider for training or review; do not route confidential code through `auto-free`.

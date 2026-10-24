@@ -70,3 +70,12 @@ with the prompt on stdin, using the user's own `codex login` (ChatGPT account). 
 - **Output:** the final `agent_message` text, then `*Codex (model · sandbox · effort)*` with files edited / commands run, like the Claude route. Token usage comes from `turn.completed`.
 - **Limits:** a message containing limit/quota/usage/credits becomes HTTP 429 (gateway falls back); after partial text the stream is broken on purpose so the gateway continues on another model.
 - **Status:** the JSON event shapes follow OpenAI's non-interactive-mode documentation; no real `codex` was available on the development machine, so the route is verified against a stand-in CLI (`tests/fake_codex.sh`, `tests/bridge.test.mjs`) and by `node ar.mjs openai --check` on your machine.
+
+## GitHub Copilot route (paid Copilot plan)
+Models `copilot-code-mini|main|max` run `copilot -p <prompt> -s --no-ask-user [--model=ID] --allow-tool=read [--allow-tool=write]` (GitHub's documented programmatic mode; `-s` = only the agent's answer) with the user's own `copilot login`.
+- **Permissions:** read-only unless the request carries tools (Copilot Agent); then `write` is allowed. Shell commands only if listed in `BRIDGE_ALLOWED_TOOLS` as `Bash(...)`. Anything not pre-approved is denied in non-interactive mode.
+- **Prompt:** passed as an argument (stdin is not documented). Prompts over 6000 characters, and anything on a Windows `.cmd` launcher, are written to `<project>/.auto-router/prompts/<id>.md` and the CLI is told to read it; the file is deleted afterwards.
+- **Output:** plain text, delivered in one piece (the CLI does not stream here) plus `*GitHub Copilot (model · mode)*`. Edited files are found by comparing file modification times (`git status` when the folder is a repository, a bounded scan otherwise). Token counts are **estimates** (chars/4): the CLI reports none.
+- **Environment:** `GH_TOKEN`, `GITHUB_TOKEN`, `COPILOT_GITHUB_TOKEN` are removed so the signed-in Copilot account is used; auto-update is disabled.
+- **Limits:** messages mentioning limit/quota/premium become HTTP 429 (the gateway falls back). Premium-request balance cannot be read, so there is no forecast for this route.
+- **Status:** verified against a stand-in CLI (`tests/fake_copilot.sh`); no real Copilot CLI was available on the development machine (the account there is on the free plan). `node ar.mjs copilot --check` verifies it for real.

@@ -80,8 +80,14 @@ Profiles E and F use OpenAI instead of Claude.
 Both ids pasted from Cloudflare's dashboard assistant were not the problem: the Account ID was right, the **token** only had "API Tokens Write" (a create-tokens token), hence "Authentication error" everywhere.
 With the owner's consent the token was used once to create `auto-router-workers-ai` (Workers AI Read+Write on that account). `node ar.mjs cloudflare-token` now automates that repair; `node ar.mjs keys --check` diagnoses it.
 
+## 2026-10-24 — GitHub Copilot plan as a third subscription route; profile "auto"; plan detection
+Users chat in the Copilot Chat window, but the gateway runs outside VS Code and cannot reach Copilot's models by itself. The sanctioned programmatic path is the Copilot CLI (`copilot -p -s`), so Copilot joins Claude and OpenAI as a bridge route (`copilot-code-*` → `copilot-mini|main|max`).
+Rejected: re-exporting `vscode.lm` over HTTP from the companion extension and community Copilot proxies (terms/abuse risk). Output is plain text (no documented JSON event schema), tokens are estimated, premium-request balance is invisible.
+With four vendor families the fixed profiles A-F stop scaling, so `init --profile auto --families …` generates the tables from a ladder per family (verified to reproduce profile A exactly), and `ar.mjs detect` reads local logins (`claude auth status`, `codex login status`, `gh api copilot_internal/user`) to pre-fill the installer's questions.
+
 ## Open items
 - Check Agent-mode edits on each `Auto:` model in the editor.
+- Verify the Copilot CLI route with a real paid plan (flags, model ids, how limits are worded).
 - Verify the Codex route with a real `codex` install (event shapes, `-m`, `-c model_reasoning_effort`).
 - Extend mid-stream continuation to the Responses and Anthropic Messages streaming formats if the VS Code endpoint uses them.
 - Buy Anthropic API credits if the API route is wanted.

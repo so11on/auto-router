@@ -5,6 +5,8 @@
 //   node ar.mjs init [options]          create .env (generated secrets), pick a routing profile, remember paths
 //   node ar.mjs keys [--check]          which keys are set (names only); --check also asks each provider whether the key works
 //   node ar.mjs cloudflare-token       mint a Workers-AI-only token from a token that can only create tokens (see docs/GET-KEYS.md)
+//   node ar.mjs detect [--json]        which paid plans / logins this computer has (Claude, ChatGPT, GitHub Copilot, keys)
+//   node ar.mjs copilot [options]       configure your paid GitHub Copilot plan as router targets (Copilot CLI)
 //   node ar.mjs openai [options]        configure OpenAI: Codex CLI with your ChatGPT login and/or an OpenAI API key
 //   node ar.mjs up | down | status      start / stop / inspect the whole stack
 //   node ar.mjs omniroute               connect the free providers whose keys are in .env, verify models, build the combos
@@ -131,6 +133,8 @@ async function doctor() {
     const st = run("codex", ["login", "status"]);
     (st.status === 0 ? ok : warn)(st.status === 0 ? "Codex is signed in" : "Codex is not signed in — run: codex login   (or: codex login --device-auth)");
   } else info("Codex CLI not found (only needed to use ChatGPT Plus/Pro: npm i -g @openai/codex, then codex login)");
+  if (which("copilot")) ok("GitHub Copilot CLI found — enables the paid Copilot plan route (then: copilot login)");
+  else info("GitHub Copilot CLI not found (only needed to use a paid Copilot plan's models: npm install -g @github/copilot)");
   const code = findCode();
   if (code) ok(`VS Code command line found (${code})`); else warn("VS Code `code` command not found — the extension must be installed by hand (Extensions view → … → Install from VSIX)");
   for (const [port, name] of [[4000, "gateway"], [20128, "OmniRoute"], [4100, "claude-bridge"]]) {
@@ -156,8 +160,9 @@ const KEY_LINKS = {
 };
 function init(flags) {
   const profile = String(flags.profile || "A").toUpperCase();
-  const pf = path.join(ROOT, "profiles", `routing.${profile}.yaml`);
-  if (!fs.existsSync(pf)) { bad(`unknown profile ${profile} (use A-F — see profiles/)`); process.exit(1); }
+  const auto = profile === "AUTO";
+  const pf = path.join(ROOT, "profiles", `routing.${auto ? "A" : profile}.yaml`);
+  if (!fs.existsSync(pf)) { bad(`unknown profile ${profile} (use A-F or auto — see profiles/)`); process.exit(1); }
   const claude = String(flags.claude || "cli");
   if (!["cli", "api", "none"].includes(claude)) { bad("--claude must be cli, api or none"); process.exit(1); }
   const openai = String(flags.openai || "cli");
@@ -182,15 +187,23 @@ function init(flags) {
     t = setEnvText(t, "BRIDGE_ALLOWED_ROOTS", roots.join(","));
     t = setEnvText(t, "CLAUDE_PRIMARY", claude === "api" ? "api" : "cli");
     t = setEnvText(t, "OPENAI_PRIMARY", openai === "api" ? "api" : "cli");
-    if (["C", "D", "F"].includes(profile)) t = setEnvText(t, "CLASSIFIER_MODEL", "pool");
+    if (["C", "D", "F"].includes(profile) || (auto && !String(flags.families ?? "").includes("gemini") && flags.families !== undefined)) t = setEnvText(t, "CLASSIFIER_MODEL", "pool");
     fs.writeFileSync(ENV_FILE, t, { mode: 0o600 });
     ok("created .env with generated secrets (permissions restricted)");
   }
   // routing profile
   const target = path.join(ROOT, "litellm", "routing.yaml");
-  if (fs.existsSync(target) && fs.readFileSync(target, "utf8") !== fs.readFileSync(pf, "utf8")) fs.copyFileSync(target, target + ".bak");
-  fs.copyFileSync(pf, target);
-  ok(`routing profile ${profile} → litellm/routing.yaml`);
+  let routingText = fs.readFileSync(pf, "utf8");
+  if (auto) {
+    const families = flags.families !== undefined ? String(flags.families).split(",").map((x) => x.trim()).filter(Boolean) : familiesFrom(detectPlans());
+    const bad2 = families.filter((f) => !LADDER[f]);
+    if (bad2.length) { bad(`unknown family: ${bad2.join(", ")} (use claude, openai, copilot, gemini)`); process.exit(1); }
+    routingText = buildRoutingText(families, String(flags.pool ?? "yes") !== "no", routingText);
+    info(`routing built for: ${families.join(", ") || "free providers only"}`);
+  }
+  if (fs.existsSync(target) && fs.readFileSync(target, "utf8") !== routingText) fs.copyFileSync(target, target + ".bak");
+  fs.writeFileSync(target, routingText);
+  ok(`routing profile ${auto ? "auto" : profile} → litellm/routing.yaml`);
   fs.mkdirSync(DATA, { recursive: true });
   fs.mkdirSync(HOME_CFG_DIR, { recursive: true });
   fs.writeFileSync(path.join(HOME_CFG_DIR, "config.json"), JSON.stringify({ repo: ROOT, stateFile: path.join(DATA, "context-state.json") }, null, 2));
@@ -249,6 +262,130 @@ async function cloudflareCheck(e) {
     ? "the token is valid but is not allowed on this account/Workers AI: create it from the Workers AI page → Use REST API → template 'Workers AI', and copy the Account ID from that same page (docs/GET-KEYS.md)"
     : "the token itself is not valid — create a new one (docs/GET-KEYS.md)";
   return `${c(31, "FAILS")}  Cloudflare: HTTP ${r.status} ${(r.json?.errors?.[0]?.message) || ""} — ${why}`;
+}
+
+// ---------------------------------------------------------------- routing generator (profile "auto")
+export const LADDER = {
+  claude: { lo: "claude-haiku", mid: "claude-sonnet", hi: "claude-opus" },
+  openai: { lo: "gpt-mini", mid: "gpt-main", hi: "gpt-max" },
+  copilot: { lo: "copilot-mini", mid: "copilot-main", hi: "copilot-max" },
+  gemini: { lo: "gemini-flash-lite", mid: "gemini-flash", hi: "gemini-pro" },
+};
+const STRENGTH = ["claude", "openai", "copilot", "gemini"];   // who leads the Smart profile
+const CHEAPNESS = ["gemini", "copilot", "claude", "openai"];  // who covers the cheap rungs of Balanced
+function tiersYaml(tiers) {
+  const merged = [];
+  for (const t of tiers) {
+    const last = merged[merged.length - 1];
+    if (last && last.model === t.model && last.effort === t.effort) last.max = t.max; else merged.push({ ...t });
+  }
+  return merged.map((t) => `    - {max_complexity: ${t.max}, model: ${t.model}${t.effort ? `, effort: ${t.effort}` : ""}}`).join("\n");
+}
+export function buildRoutingText(families, pool, base) {
+  const fams = STRENGTH.filter((f) => families.includes(f));
+  const best = fams[0], cheap = CHEAPNESS.find((f) => fams.includes(f));
+  const free = [{ max: 2, model: "free-pool-fast" }, { max: 5, model: "free-pool-coding" }];
+  let balanced, smart;
+  if (!best) { balanced = free; smart = [{ max: 5, model: "free-pool-coding" }]; }
+  else {
+    const B = LADDER[best], C = LADDER[cheap];
+    balanced = [{ max: 1, model: pool ? "free-pool-fast" : C.lo }, { max: 2, model: C.lo }, { max: 3, model: C.mid },
+      { max: 4, model: B.mid, effort: "low" }, { max: 5, model: B.mid, effort: "medium" }];
+    smart = [{ max: 1, model: B.lo }, { max: 2, model: B.mid, effort: "low" }, { max: 3, model: B.mid, effort: "medium" },
+      { max: 4, model: B.hi, effort: "medium" }, { max: 5, model: B.hi, effort: "high" }];
+  }
+  const freeTiers = pool ? free : (best ? [{ max: 5, model: "gemini-free-flash-lite" }] : free);
+  const head = base.slice(0, base.indexOf("modes:")).replace(/^# Profile .*\n/, "");
+  const tail = base.slice(base.indexOf("# Pins:"));
+  return `# Profile "auto": generated by \`node ar.mjs init --profile auto\` for: ${fams.join(", ") || "free providers only"}${pool ? " + free pool" : ""}. Edit freely.\n` + head +
+    `modes:\n  free:\n${tiersYaml(freeTiers)}\n  balanced:\n${tiersYaml(balanced)}\n  smart:\n${tiersYaml(smart)}\n\n` + tail;
+}
+
+// ---------------------------------------------------------------- detect
+function tryJson(cmd, args) { const r = run(cmd, args); try { return r.status === 0 ? JSON.parse(r.stdout) : null; } catch { return null; } }
+export function detectPlans() {
+  const e = readEnv() || {};
+  const out = { claude: { cli: false }, openai: { cli: false }, copilot: { cli: false }, gemini: {}, keys: {} };
+  if (which("claude")) {
+    const st = tryJson("claude", ["auth", "status"]);
+    out.claude = { cli: true, loggedIn: st ? Boolean(st.loggedIn) : null, plan: st?.subscriptionType || null };
+  }
+  out.claude.apiKey = Boolean(e.ANTHROPIC_API_KEY);
+  if (which("codex")) out.openai = { cli: true, loggedIn: run("codex", ["login", "status"]).status === 0 };
+  out.openai.apiKey = Boolean(e.OPENAI_API_KEY);
+  out.copilot.cli = Boolean(which("copilot"));
+  if (which("gh")) {
+    const u = tryJson("gh", ["api", "copilot_internal/user"]); // best effort: an undocumented GitHub endpoint that editors also use
+    if (u) out.copilot = { ...out.copilot, ghSignedIn: true, plan: u.copilot_plan || null, sku: u.access_type_sku || null,
+      paid: Boolean(u.access_type_sku && !/free|limited/i.test(u.access_type_sku)), cliAllowed: u.cli_enabled ?? null };
+    else out.copilot.ghSignedIn = run("gh", ["auth", "status"]).status === 0;
+  }
+  out.gemini = { paidKey: Boolean(e.GEMINI_API_KEY), freeKey: Boolean(e.GEMINI_FREE_API_KEY) };
+  out.keys = Object.fromEntries(PROVIDERS.map(([k, id]) => [id, Boolean(e[k])]).concat([["cloudflare", Boolean(e.CLOUDFLARE_API_TOKEN && e.CLOUDFLARE_ACCOUNT_ID)]]));
+  return out;
+}
+export function familiesFrom(d) {
+  const f = [];
+  if ((d.claude.cli && d.claude.loggedIn !== false) || d.claude.apiKey) f.push("claude");
+  if ((d.openai.cli && d.openai.loggedIn) || d.openai.apiKey) f.push("openai");
+  if (d.copilot.cli && d.copilot.paid) f.push("copilot");
+  if (d.gemini.paidKey) f.push("gemini");
+  return f;
+}
+function detect(flags) {
+  const d = detectPlans();
+  if (flags.json) return console.log(JSON.stringify(d, null, 2));
+  const yn = (v) => (v === true ? c(32, "yes") : v === false ? c(90, "no") : c(33, "unknown"));
+  console.log("What this computer has (nothing here is sent anywhere; no e-mails or keys are printed)\n");
+  console.log(`Claude        CLI: ${yn(d.claude.cli)}  signed in: ${yn(d.claude.loggedIn)}  plan: ${d.claude.plan || "?"}   |  API key in .env: ${yn(d.claude.apiKey)}`);
+  console.log(`ChatGPT/Codex CLI: ${yn(d.openai.cli)}  signed in: ${yn(d.openai.loggedIn)}  (Plus/Pro cannot be told apart)   |  OpenAI API key in .env: ${yn(d.openai.apiKey)}`);
+  console.log(`GitHub Copilot CLI: ${yn(d.copilot.cli)}  GitHub account: ${yn(d.copilot.ghSignedIn)}  plan: ${d.copilot.plan || "?"} (${d.copilot.sku || "?"}) paid: ${yn(d.copilot.paid)}  Copilot CLI allowed: ${yn(d.copilot.cliAllowed)}`);
+  console.log(`Gemini        billed key: ${yn(d.gemini.paidKey)}  free-tier key: ${yn(d.gemini.freeKey)}`);
+  console.log(`Free pool keys in .env: ${Object.entries(d.keys).filter(([, v]) => v).map(([k]) => k).join(", ") || "none"}`);
+  const fams = familiesFrom(d);
+  console.log(`\nSuggested routing families: ${fams.join(", ") || "none (free providers only)"}`);
+  console.log("Always confirm with the person: a login can be on a free plan, and the paid tier (Plus vs Pro, Pro vs Max) is not always visible.");
+  if (d.claude.cli && d.claude.loggedIn === false) info("Claude Code is installed but not signed in: run `claude`.");
+  if (d.openai.cli && !d.openai.loggedIn) info("Codex is installed but not signed in: run `codex login`.");
+  if (d.copilot.ghSignedIn && d.copilot.paid && !d.copilot.cli) info("Paid Copilot plan found but no Copilot CLI: npm install -g @github/copilot, then run `copilot login`.");
+  if (d.copilot.ghSignedIn && d.copilot.paid === false) info("This GitHub account is on a free Copilot plan; paid-plan models are not available through it.");
+}
+
+// ---------------------------------------------------------------- copilot
+const CP_BEGIN = "  # >>> copilot (managed by ar.mjs)", CP_END = "  # <<< copilot";
+const CPF_BEGIN = "    # >>> copilot-fallbacks (managed by ar.mjs)", CPF_END = "    # <<< copilot-fallbacks";
+export function copilotBlocks({ hasGemini }) {
+  const models = ["mini", "main", "max"].map((t) => `  - {model_name: copilot-${t}, litellm_params: {model: openai/copilot-code-${t}, api_base: http://host.docker.internal:4100/v1, api_key: os.environ/BRIDGE_KEY}}`).join("\n");
+  const fallbacks = hasGemini ? ["mini", "main", "max"].map((t) => `    - {copilot-${t}: [gemini-flash-lite]}`).join("\n") : "";
+  return { models, fallbacks };
+}
+async function copilot(flags) {
+  const e = readEnv();
+  if (!e) return bad("no .env — run: node ar.mjs init");
+  if (!which("copilot")) return bad("Copilot CLI not found. Install: npm install -g @github/copilot  (or winget install GitHub.Copilot / brew install --cask copilot-cli), then run: copilot login");
+  const d = detectPlans().copilot;
+  if (d.paid === false) warn(`this GitHub account reports a free Copilot plan (${d.sku}); the CLI may refuse paid models`);
+  if (d.cliAllowed === false) warn("GitHub says the Copilot CLI is disabled for this account/organization");
+  const ids = { mini: flags.mini, main: flags.main, max: flags.max };
+  const given = (t) => (ids[t] && ids[t] !== true ? ids[t] : "");
+  if (flags.check) {
+    for (const t of ["mini", "main", "max"]) {
+      if (!given(t) && t !== "main") continue;
+      const r = run("copilot", ["-p", "Reply with one word: ok", "-s", "--no-ask-user", ...(given(t) ? [`--model=${given(t)}`] : [])], { timeout: 180000, env: { ...process.env, GH_TOKEN: "", GITHUB_TOKEN: "", COPILOT_GITHUB_TOKEN: "" } });
+      (r.status === 0 && r.stdout.trim() ? ok : bad)(`Copilot CLI${given(t) ? " " + given(t) : " (default model)"}: ${r.status === 0 && r.stdout.trim() ? "answers" : (r.stderr || r.stdout || "failed").trim().slice(-200)}`);
+    }
+    return info("Each check uses one Copilot request (premium models count against your plan's monthly premium requests).");
+  }
+  const cfgPath = path.join(ROOT, "litellm", "config.yaml");
+  let cfg = fs.readFileSync(cfgPath, "utf8");
+  const b = copilotBlocks({ hasGemini: Boolean(e.GEMINI_API_KEY) });
+  cfg = applyBlocks(applyBlocks(cfg, CP_BEGIN, CP_END, b.models), CPF_BEGIN, CPF_END, b.fallbacks);
+  fs.writeFileSync(cfgPath, cfg);
+  for (const [t, k] of [["mini", "COPILOT_MODEL_MINI"], ["main", "COPILOT_MODEL_MAIN"], ["max", "COPILOT_MODEL_MAX"]]) setEnv(k, given(t));
+  ok("GitHub Copilot configured: copilot-mini / copilot-main / copilot-max");
+  info("Models: " + (given("main") || given("mini") || given("max") ? `mini=${given("mini") || "default"} main=${given("main") || "default"} max=${given("max") || "default"}` : "the CLI's default model for all three (choose with --mini/--main/--max; run `copilot` and type /model to see the names your plan offers)"));
+  info("Verify: node ar.mjs copilot --main <id> --check   |   use it: node ar.mjs init --roots <folders> --profile auto   |   pins: !copilot, !copilot-max, !copilot-mini");
+  info("Apply: node ar.mjs down && node ar.mjs up");
 }
 
 async function cloudflareToken() {
@@ -647,9 +784,11 @@ function usage(flags) {
 const HELP = `auto-router — node ar.mjs <command>
 
   doctor      check Docker, Node, Claude CLI, VS Code, ports
-  init        --roots <folders> [--profile A-F] [--claude cli|api|none] [--openai cli|api|none] [--force]
+  init        --roots <folders> [--profile A-F|auto] [--families claude,openai,copilot,gemini] [--pool yes|no] [--claude cli|api|none] [--openai cli|api|none] [--force]
   keys        [--check] show which keys are set; --check tests each one against its provider
   cloudflare-token   fix "Authentication error" when CLOUDFLARE_API_TOKEN is a 'create tokens' token (docs/GET-KEYS.md)
+  detect      [--json]  find out which paid plans/logins exist (never prints e-mails or keys)
+  copilot     [--mini ID --main ID --max ID] [--check]   use your paid GitHub Copilot plan (Copilot CLI)
   openai      [--list] [--route cli|api|both] [--mini ID --main ID --max ID] [--check]   OpenAI via ChatGPT login (Codex CLI) and/or API key
   up | down | status
   omniroute   [--no-llm7]   connect free providers, verify models, build the combos
@@ -658,7 +797,8 @@ const HELP = `auto-router — node ar.mjs <command>
   logs        [-f] [--errors] [--tail N] [--type T] [--rid ID] [--since 30m] [--raw]
   usage       [--since 24h|7d|all] [--by model|mode|task]
 
-Profiles: A Claude + billed Gemini + free pool | B Gemini only | C Claude + free pool | D free only
+Profile "auto" builds the routing from the plans you have (--families, or detected). Fixed profiles:
+          A Claude + billed Gemini + free pool | B Gemini only | C Claude + free pool | D free only
           E OpenAI + billed Gemini + free pool | F OpenAI + free pool`;
 
 async function main() {
@@ -669,6 +809,8 @@ async function main() {
     case "init": return init(flags);
     case "keys": return keys(flags);
     case "openai": return openai(flags);
+    case "detect": return detect(flags);
+    case "copilot": return copilot(flags);
     case "cloudflare-token": return cloudflareToken();
     case "up": return up(flags);
     case "down": return down();

@@ -50,6 +50,10 @@ const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 const CODEX_BIN = process.env.CODEX_BIN || "codex";
 const CODEX_MODELS = { "codex-code-mini": process.env.CODEX_MODEL_MINI || "", "codex-code-main": process.env.CODEX_MODEL_MAIN || "", "codex-code-max": process.env.CODEX_MODEL_MAX || "" };
 const CODEX_AGENT_SANDBOX = process.env.CODEX_AGENT_SANDBOX || "workspace-write"; // used when the request carries tools
+// ---- GitHub Copilot CLI (paid Copilot plan) ----
+const COPILOT_BIN = process.env.COPILOT_BIN || "copilot";
+const COPILOT_MODELS = { "copilot-code-mini": process.env.COPILOT_MODEL_MINI || "", "copilot-code-main": process.env.COPILOT_MODEL_MAIN || "", "copilot-code-max": process.env.COPILOT_MODEL_MAX || "" };
+const COPILOT_PROMPT_INLINE_MAX = 6000;
 const shellArg = (a) => (IS_WIN ? `"${String(a).replace(/"/g, '\\"')}"` : a);
 const DATA_DIR = process.env.AUTO_ROUTER_DATA || path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "data");
 const FRESH_SESSION_AT = Number(process.env.BRIDGE_FRESH_SESSION_AT || 0.8); // of the CLI's context window
@@ -178,13 +182,30 @@ function transcript(msgs) {
   return out.join("\n\n");
 }
 
+function walkChanged(root, sinceMs, out = [], depth = 0, budget = { n: 4000 }) {
+  if (depth > 5 || out.length >= 30) return out;
+  let entries = [];
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return out; }
+  for (const e of entries) {
+    if (budget.n-- <= 0 || out.length >= 30) break;
+    if (/^(\.git|node_modules|\.auto-router|\.venv|__pycache__|dist|build)$/.test(e.name)) continue;
+    const full = path.join(root, e.name);
+    if (e.isDirectory()) walkChanged(full, sinceMs, out, depth + 1, budget);
+    else { try { if (fs.statSync(full).mtimeMs > sinceMs) out.push(full); } catch {} }
+  }
+  return out;
+}
+
+// Files modified after `sinceMs`: `git status` when the folder is a repository, otherwise a bounded folder scan.
 function changedSince(cwd, sinceMs) {
   try {
-    const out = execFileSync("git", ["-C", cwd, "status", "--porcelain"], { encoding: "utf8", timeout: 5000 });
+    const out = execFileSync("git", ["-C", cwd, "status", "--porcelain"], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] });
     return out.split("\n").filter(Boolean).map((l) => l.slice(3).trim().replace(/^"|"$/g, ""))
       .filter((f) => { try { return fs.statSync(path.join(cwd, f)).mtimeMs > sinceMs; } catch { return true; } })
       .slice(0, 30);
-  } catch { return []; }
+  } catch {
+    return walkChanged(cwd, sinceMs).map((f) => path.relative(cwd, f));
+  }
 }
 
 const sse = (res, obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
@@ -436,12 +457,101 @@ async function handleCodex(req, res, body) {
   });
 }
 
+// ---------- GitHub Copilot CLI route ----------
+// `copilot -p <prompt> -s` (programmatic mode, silent = only the agent's answer) with the user's own Copilot login.
+// The prompt can only be passed as an argument (stdin is not documented), so long prompts, and anything on Windows .cmd
+// launchers, are written to <workspace>/.auto-router/prompts/ and the CLI is told to read that file.
+async function handleCopilot(req, res, body) {
+  const messages = body.messages || [];
+  const lastUserIdx = messages.map((m) => m.role).lastIndexOf("user");
+  const task = textOf(messages[lastUserIdx]?.content).trim();
+  const firstUser = textOf(messages.find((m) => m.role === "user")?.content).slice(0, 2000);
+  const convId = "copilot:" + createHash("sha1").update(firstUser).digest("hex");
+  const agent = Array.isArray(body.tools) && body.tools.length > 0 && req.headers["x-copilot-mode"] !== "read-only";
+  const stream = body.stream === true;
+  const model = COPILOT_MODELS[body.model] || "";
+
+  return withLock(convId, async () => {
+    const st = state[convId] || {};
+    const cwd = detectWorkspace(messages, req.headers["x-workspace"], st.cwd);
+    if (!inAllowedRoot(cwd)) {
+      res.writeHead(403, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ error: { message: `copilot-bridge: workspace ${cwd} is outside BRIDGE_ALLOWED_ROOTS`, type: "permission_error" } }));
+    }
+    const parts = ["## How you are being used\nYou are driven through a chat bridge; the reply is shown in a VS Code chat. " +
+      (agent ? "Do the work with your tools, then answer concisely. " : "Read-only: do not modify files. ") +
+      "Other models may continue this conversation, so state what you changed and any open follow-ups."];
+    const history = transcript(messages.slice(Math.max(0, lastUserIdx - 12), lastUserIdx));
+    if (history) parts.push(`## Conversation so far (other models may have answered)\n${history}`);
+    const ext = changedSince(cwd, st.lastEnd || 0);
+    if (ext.length) parts.push(`## Files changed on disk since your last turn\n${ext.map((f) => `- ${f}`).join("\n")}\nRe-read them before editing.`);
+    parts.push(`## Current request\n${task}`);
+    let prompt = parts.join("\n\n");
+    let promptFile = null;
+    if (prompt.length > COPILOT_PROMPT_INLINE_MAX || (IS_WIN && /\.(cmd|bat)$/i.test(COPILOT_BIN))) {
+      const dir = path.join(cwd, ".auto-router", "prompts");
+      fs.mkdirSync(dir, { recursive: true });
+      try { ensureGitignore(cwd); } catch {}
+      promptFile = path.join(dir, `${randomUUID().slice(0, 8)}.md`);
+      fs.writeFileSync(promptFile, prompt);
+      prompt = `Read the file ${path.relative(cwd, promptFile)} and follow the instructions in it exactly. Reply only with your answer to its "Current request" section.`;
+    }
+    const args = ["-p", IS_WIN && /\.(cmd|bat)$/i.test(COPILOT_BIN) ? `"${prompt.replace(/"/g, '\\"')}"` : prompt, "-s", "--no-ask-user"];
+    if (model) args.push(`--model=${model}`);
+    args.push("--allow-tool=read");
+    if (agent) args.push("--allow-tool=write");
+    for (const t of ALLOWED_TOOLS.split(/\s+/).filter(Boolean)) if (agent && t.startsWith("shell")) args.push(`--allow-tool=${t.replace(/^Bash/, "shell")}`);
+    const env = { ...process.env };
+    for (const k of ["GH_TOKEN", "GITHUB_TOKEN", "COPILOT_GITHUB_TOKEN"]) delete env[k]; // use the Copilot login, not an ambient token
+    env.COPILOT_AUTO_UPDATE = "false";
+    const t0 = Date.now();
+    const child = spawn(COPILOT_BIN, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"], shell: IS_WIN && /\.(cmd|bat)$/i.test(COPILOT_BIN) });
+    const killer = setTimeout(() => child.kill("SIGKILL"), TIMEOUT_MS);
+    res.on("close", () => { if (child.exitCode === null) child.kill("SIGTERM"); });
+    let out = "", errText = "";
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (errText += d));
+    const code = await new Promise((r) => child.on("close", r));
+    clearTimeout(killer);
+    if (promptFile) { try { fs.unlinkSync(promptFile); } catch {} }
+
+    const text = out.trim();
+    if (code !== 0 || !text) {
+      const msg = String(errText || out || `copilot exited ${code}`).trim().slice(-400);
+      const limited = /limit|quota|premium|rate|exceeded|usage/i.test(msg);
+      state[convId] = { cwd, lastEnd: Date.now() };
+      saveState();
+      res.writeHead(limited ? 429 : 502, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ error: { message: `copilot-bridge: ${msg}`, type: limited ? "rate_limit_error" : "server_error" } }));
+    }
+    const files = changedSince(cwd, t0 - 1000).filter((f) => !f.startsWith(".auto-router"));
+    let actions = `\n\n---\n*GitHub Copilot (${[model || "default model", agent ? "can edit" : "read-only"].join(" · ")})*`;
+    if (files.length) actions += `\n- files changed: ${files.slice(0, 12).map((f) => `\`${f}\``).join(", ")}`;
+    if (!agent) actions += `\n- read-only mode (no edits made)`;
+    const full = text + actions;
+    state[convId] = { cwd, lastEnd: Date.now() };
+    saveState();
+    const id = `chatcmpl-${randomUUID()}`, created = Math.floor(Date.now() / 1000);
+    const pt = Math.ceil(prompt.length / 4), ct = Math.ceil(full.length / 4); // the CLI reports no token counts: estimate
+    const use = { prompt_tokens: pt, completion_tokens: ct, total_tokens: pt + ct };
+    if (stream) {
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+      const chunk = (delta, finish = null) => ({ id, object: "chat.completion.chunk", created, model: body.model, choices: [{ index: 0, delta, finish_reason: finish }] });
+      sse(res, chunk({ role: "assistant" })); sse(res, chunk({ content: full })); sse(res, chunk({}, "stop"));
+      sse(res, { id, object: "chat.completion.chunk", created, model: body.model, choices: [], usage: use });
+      res.write("data: [DONE]\n\n"); return res.end();
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ id, object: "chat.completion", created, model: body.model, choices: [{ index: 0, message: { role: "assistant", content: full }, finish_reason: "stop" }], usage: use }));
+  });
+}
+
 http.createServer((req, res) => {
   if (req.url === "/healthz") return res.end("ok");
   if (req.headers.authorization !== `Bearer ${BRIDGE_KEY}`) { res.writeHead(401); return res.end("unauthorized"); }
   if (req.method === "GET" && req.url.startsWith("/v1/models")) {
     res.writeHead(200, { "content-type": "application/json" });
-    return res.end(JSON.stringify({ object: "list", data: [...Object.keys(MODELS), ...Object.keys(CODEX_MODELS)].map((id) => ({ id, object: "model", owned_by: id.startsWith("codex") ? "codex" : "claude-code" })) }));
+    return res.end(JSON.stringify({ object: "list", data: [...Object.keys(MODELS), ...Object.keys(CODEX_MODELS), ...Object.keys(COPILOT_MODELS)].map((id) => ({ id, object: "model", owned_by: id.startsWith("codex") ? "codex" : id.startsWith("copilot") ? "github-copilot" : "claude-code" })) }));
   }
   if (req.method === "POST" && req.url.startsWith("/memory/write")) {
     let raw = "";
@@ -466,7 +576,7 @@ http.createServer((req, res) => {
     req.on("data", (d) => (raw += d));
     req.on("end", () => {
       let body; try { body = JSON.parse(raw); } catch { res.writeHead(400); return res.end("bad json"); }
-      (String(body.model || "").startsWith("codex-code-") ? handleCodex : handle)(req, res, body).catch((e) => { if (!res.headersSent) res.writeHead(500); res.end(JSON.stringify({ error: { message: String(e) } })); });
+      (String(body.model || "").startsWith("codex-code-") ? handleCodex : String(body.model || "").startsWith("copilot-code-") ? handleCopilot : handle)(req, res, body).catch((e) => { if (!res.headersSent) res.writeHead(500); res.end(JSON.stringify({ error: { message: String(e) } })); });
     });
     return;
   }

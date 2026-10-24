@@ -32,6 +32,9 @@ pins:
   gpt:      {model: gpt-main,  effort: medium, natural: true}
   gpt-max:  {model: gpt-max,   effort: high}
   gpt-mini: {model: gpt-mini}
+  copilot:      {model: copilot-main,  effort: medium, natural: true}
+  copilot-max:  {model: copilot-max,   effort: high}
+  copilot-mini: {model: copilot-mini}
 
 # Mid-task model switching (policy.py). The profile table above is the floor/ceiling: switching never leaves it.
 switching:

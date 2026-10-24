@@ -58,6 +58,10 @@ model_list:
   # >>> openai (managed by ar.mjs)
   # <<< openai
 
+  # --- GitHub Copilot paid plan, through the Copilot CLI (written by `node ar.mjs copilot`) ---
+  # >>> copilot (managed by ar.mjs)
+  # <<< copilot
+
   # --- virtual models shown in the VS Code picker; the hook rewrites them ---
   - model_name: auto-free
     litellm_params: {model: openai/free-fast, api_base: os.environ/FREE_POOL_BASE, api_key: os.environ/FREE_POOL_KEY, timeout: 15, num_retries: 0}
@@ -75,6 +79,8 @@ router_settings:
     - {free-pool-coding: [gemini-free-flash-lite]}
     - {free-pool-fast: [gemini-free-flash-lite]}
     - {test-flaky: [gemini-flash-lite]}
+    # >>> copilot-fallbacks (managed by ar.mjs)
+    # <<< copilot-fallbacks
     # >>> openai-fallbacks (managed by ar.mjs)
     # <<< openai-fallbacks
     - {pool-deepseek: [free-pool-coding]}

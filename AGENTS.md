@@ -41,7 +41,7 @@ docker compose up -d --force-recreate litellm  # after editing config.yaml / rou
 7. Verify model ids by calling the provider before adding them; do not guess ids. Record measurements in `docs/FREE-TIER-LIMITS.md`.
 8. Never print or commit secrets from `.env`.
 
-9. The bridge strips `ANTHROPIC_*` for `claude` and `OPENAI_*`/`CODEX_API_KEY` for `codex` so subscriptions, not API keys, are used. Never hard-code OpenAI model ids: they come from `ar.mjs openai` after a verifying call.
+9. The bridge strips `ANTHROPIC_*` for `claude`, `OPENAI_*`/`CODEX_API_KEY` for `codex` and `GH_TOKEN`/`GITHUB_TOKEN`/`COPILOT_GITHUB_TOKEN` for `copilot` so subscriptions, not API keys, are used. Never hard-code OpenAI model ids: they come from `ar.mjs openai` after a verifying call.
 9b. VS Code auth is `requestHeaders` (not `apiKey`); the model footer is part of the answer text and is stripped from history — keep both behaviours.
 10. Pins (`pins:` in routing.yaml) never let `auto-free` reach a paid model; keep that check in `async_pre_call_hook`.
 11. Streaming failover: `router_hook.async_post_call_streaming_iterator_hook` continues a broken answer on the next fallback; keep it Chat-Completions-only unless you test the other formats.

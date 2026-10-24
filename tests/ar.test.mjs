@@ -6,7 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseEnv, setEnvText, patchProviders, buildProvider, vscodeUserDir, openaiBlocks, applyBlocks } from "../ar.mjs";
+import { parseEnv, setEnvText, patchProviders, buildProvider, vscodeUserDir, openaiBlocks, applyBlocks, buildRoutingText, familiesFrom, copilotBlocks, LADDER } from "../ar.mjs";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -52,6 +52,58 @@ test("openai blocks: routes, fallbacks and managed markers in config.yaml", () =
   assert.ok(out.includes("gpt-mini-api") && out.includes("- {gpt-max-api: [gpt-max-cli"));
   assert.equal(applyBlocks(out, begin, end, "").includes("model_name: gpt-mini-api"), false, "re-applying replaces the block");
   assert.throws(() => applyBlocks("no markers", begin, end, "x"), /not found/);
+});
+
+const BASE = fs.readFileSync(path.join(ROOT, "profiles", "routing.A.yaml"), "utf8");
+const tiers = (text, mode) => text.split(`  ${mode}:\n`)[1].split(/\n  \w+:\n|\n\n/)[0].split("\n").map((l) => l.trim());
+
+test("profile auto: Claude+Gemini+pool reproduces the hand-made profile A tables", () => {
+  const out = buildRoutingText(["claude", "gemini"], true, BASE);
+  assert.deepEqual(tiers(out, "balanced"), tiers(BASE, "balanced"));
+  assert.deepEqual(tiers(out, "smart"), tiers(BASE, "smart"));
+  assert.deepEqual(tiers(out, "free"), tiers(BASE, "free"));
+  assert.match(out, /^# Profile "auto"/);
+  assert.match(out, /pins:/);
+});
+
+test("profile auto: copilot, openai, free-only and no-pool combinations", () => {
+  const cp = buildRoutingText(["copilot"], true, BASE);
+  assert.match(tiers(cp, "smart").join(" "), /copilot-max/);
+  assert.ok(!/claude-|gpt-|gemini-/.test(tiers(cp, "smart").join(" ") + tiers(cp, "balanced").join(" ")));
+  const both = buildRoutingText(["openai", "copilot", "gemini"], true, BASE);
+  assert.match(tiers(both, "smart").join(" "), /gpt-max/, "openai leads over copilot when both exist");
+  assert.match(tiers(both, "balanced").join(" "), /gemini-flash-lite.*gemini-flash/s, "gemini covers the cheap rungs");
+  const free = buildRoutingText([], true, BASE);
+  assert.deepEqual(tiers(free, "smart"), ["- {max_complexity: 5, model: free-pool-coding}"]);
+  const noPool = buildRoutingText(["claude"], false, BASE);
+  assert.ok(!/free-pool/.test(tiers(noPool, "balanced").join(" ")));
+  assert.match(tiers(noPool, "free").join(" "), /gemini-free-flash-lite/);
+  for (const f of Object.keys(LADDER)) assert.ok(LADDER[f].lo && LADDER[f].mid && LADDER[f].hi);
+});
+
+test("familiesFrom maps detected plans to routing families", () => {
+  const d = { claude: { cli: true, loggedIn: true }, openai: { cli: true, loggedIn: false, apiKey: false }, copilot: { cli: true, paid: true }, gemini: { paidKey: false } };
+  assert.deepEqual(familiesFrom(d), ["claude", "copilot"]);
+  d.copilot.paid = false; d.openai.apiKey = true; d.gemini.paidKey = true;
+  assert.deepEqual(familiesFrom(d), ["claude", "openai", "gemini"]);
+});
+
+test("copilot blocks and fresh install with --profile auto", () => {
+  assert.match(copilotBlocks({ hasGemini: true }).models, /copilot-main.*copilot-code-main.*4100/);
+  assert.match(copilotBlocks({ hasGemini: true }).fallbacks, /copilot-max: \[gemini-flash-lite\]/);
+  assert.equal(copilotBlocks({ hasGemini: false }).fallbacks, "");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ar-auto-"));
+  const copy = path.join(tmp, "repo");
+  fs.cpSync(ROOT, copy, { recursive: true, filter: (s) => !/[\\/](\.git|data|node_modules|\.auto-router)([\\/]|$)/.test(s) && !/[\\/]\.env(\.bak)?$/.test(s) });
+  const home = path.join(tmp, "home"); fs.mkdirSync(path.join(home, "code"), { recursive: true });
+  const r = spawnSync(process.execPath, [path.join(copy, "ar.mjs"), "init", "--roots", path.join(home, "code"), "--profile", "auto", "--families", "copilot,gemini"],
+    { encoding: "utf8", env: { ...process.env, HOME: home, USERPROFILE: home } });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const routing = fs.readFileSync(path.join(copy, "litellm", "routing.yaml"), "utf8");
+  assert.match(routing, /for: copilot, gemini|for: copilot, gemini \+ free pool/);
+  assert.match(routing, /copilot-max/);
+  assert.equal(parseEnv(fs.readFileSync(path.join(copy, ".env"), "utf8")).CLASSIFIER_MODEL, "gemini/gemini-3.5-flash-lite");
+  fs.rmSync(tmp, { recursive: true, force: true });
 });
 
 test("profiles A-F exist, are valid, and every model they name is defined or a known family", () => {
