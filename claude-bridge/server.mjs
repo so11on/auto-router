@@ -46,6 +46,11 @@ const MODELS = {
   "claude-code-opus": process.env.CC_OPUS || "claude-opus-5-5",
 };
 const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+// ---- OpenAI Codex CLI (ChatGPT Plus/Pro sign-in) ----
+const CODEX_BIN = process.env.CODEX_BIN || "codex";
+const CODEX_MODELS = { "codex-code-mini": process.env.CODEX_MODEL_MINI || "", "codex-code-main": process.env.CODEX_MODEL_MAIN || "", "codex-code-max": process.env.CODEX_MODEL_MAX || "" };
+const CODEX_AGENT_SANDBOX = process.env.CODEX_AGENT_SANDBOX || "workspace-write"; // used when the request carries tools
+const shellArg = (a) => (IS_WIN ? `"${String(a).replace(/"/g, '\\"')}"` : a);
 const DATA_DIR = process.env.AUTO_ROUTER_DATA || path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "data");
 const FRESH_SESSION_AT = Number(process.env.BRIDGE_FRESH_SESSION_AT || 0.8); // of the CLI's context window
 
@@ -337,12 +342,106 @@ async function handle(req, res, body) {
   });
 }
 
+// ---------- OpenAI Codex CLI route ----------
+// Same idea as the Claude route: run the official `codex` program with the user's own ChatGPT login (`codex login`),
+// non-interactively (`codex exec --json`), prompt through stdin. Every turn is a fresh Codex session: the conversation so
+// far is replayed in the prompt (no `resume`, whose flags differ from `exec`).
+async function handleCodex(req, res, body) {
+  const messages = body.messages || [];
+  const lastUserIdx = messages.map((m) => m.role).lastIndexOf("user");
+  const task = textOf(messages[lastUserIdx]?.content).trim();
+  const firstUser = textOf(messages.find((m) => m.role === "user")?.content).slice(0, 2000);
+  const convId = "codex:" + createHash("sha1").update(firstUser).digest("hex");
+  const sandbox = req.headers["x-codex-sandbox"] || (Array.isArray(body.tools) && body.tools.length ? CODEX_AGENT_SANDBOX : "read-only");
+  const effort = { low: "low", medium: "medium", high: "high" }[body.reasoning_effort] || null;
+  const stream = body.stream === true;
+  const model = CODEX_MODELS[body.model] || "";
+
+  return withLock(convId, async () => {
+    const st = state[convId] || {};
+    const cwd = detectWorkspace(messages, req.headers["x-workspace"], st.cwd);
+    if (!inAllowedRoot(cwd)) {
+      res.writeHead(403, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ error: { message: `codex-bridge: workspace ${cwd} is outside BRIDGE_ALLOWED_ROOTS`, type: "permission_error" } }));
+    }
+    const parts = ["## How you are being used\nYou are driven through a chat bridge; the reply is shown in a VS Code chat. Do the work with your tools, " +
+      "then answer concisely. Other models may continue this conversation, so state what you changed and any open follow-ups."];
+    const history = transcript(messages.slice(Math.max(0, lastUserIdx - 12), lastUserIdx));
+    if (history) parts.push(`## Conversation so far (other models may have answered)\n${history}`);
+    const ext = changedSince(cwd, st.lastEnd || 0);
+    if (ext.length) parts.push(`## Files changed on disk since your last turn\n${ext.map((f) => `- ${f}`).join("\n")}\nRe-read them before editing.`);
+    parts.push(`## Current request\n${task}`);
+
+    const args = ["exec", "--json", "--skip-git-repo-check", "--ephemeral", "--sandbox", sandbox, "-C", cwd];
+    if (model) args.push("-m", model);
+    if (effort) args.push("-c", shellArg(`model_reasoning_effort="${effort}"`));
+    args.push("-");
+    const env = { ...process.env };
+    for (const k of ["OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE"]) delete env[k]; // use the ChatGPT login, never an API key
+    const child = spawn(CODEX_BIN, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"], shell: IS_WIN && /\.(cmd|bat)$/i.test(CODEX_BIN) });
+    child.stdin.on("error", () => {});
+    child.stdin.end(parts.join("\n\n"));
+    const killer = setTimeout(() => child.kill("SIGKILL"), TIMEOUT_MS);
+    res.on("close", () => { if (child.exitCode === null) child.kill("SIGTERM"); });
+
+    const id = `chatcmpl-${randomUUID()}`, created = Math.floor(Date.now() / 1000);
+    const chunk = (delta, finish = null) => ({ id, object: "chat.completion.chunk", created, model: body.model, choices: [{ index: 0, delta, finish_reason: finish }] });
+    let started = false, full = "", errText = "", resultErr = null, buf = "", usage = null;
+    const files = new Set(), cmds = [];
+    const begin = () => { if (started) return; started = true; if (stream) { res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" }); sse(res, chunk({ role: "assistant" })); } };
+    const emit = (t) => { full += t; if (stream) { begin(); sse(res, chunk({ content: t })); } };
+
+    child.stderr.on("data", (d) => (errText += d));
+    child.stdout.on("data", (d) => {
+      buf += d;
+      let i;
+      while ((i = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, i); buf = buf.slice(i + 1);
+        let ev; try { ev = JSON.parse(line); } catch { continue; }
+        const item = ev.item || {};
+        if (ev.type === "item.completed" && item.type === "agent_message" && item.text) emit((full ? "\n\n" : "") + item.text);
+        else if (ev.type === "item.completed" && item.type === "command_execution" && item.command) cmds.push(String(item.command).split("\n")[0].slice(0, 120));
+        else if (ev.type === "item.completed" && item.type === "file_change") {
+          for (const c of item.changes || []) if (c.path) files.add(path.relative(cwd, c.path));
+          if (item.path) files.add(path.relative(cwd, item.path));
+        } else if (ev.type === "turn.completed") usage = ev.usage || null;
+        else if (ev.type === "turn.failed" || ev.type === "error") resultErr = ev.error?.message || ev.message || "codex error";
+      }
+    });
+    const code = await new Promise((r) => child.on("close", r));
+    clearTimeout(killer);
+
+    if (code !== 0 || resultErr) {
+      const msg = String(resultErr || errText || `codex exited ${code}`).slice(0, 400);
+      const limited = /limit|quota|usage|rate|credits/i.test(msg);
+      state[convId] = { cwd, lastEnd: Date.now() };
+      saveState();
+      if (full && stream && started) { emit(`\n\n---\n*Codex was interrupted: ${msg}*` + (files.size ? `\n- files edited before the interruption: ${[...files].map((f) => `\`${f}\``).join(", ")}` : "")); return res.destroy(new Error("codex interrupted")); }
+      if (!res.headersSent) res.writeHead(limited ? 429 : 502, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ error: { message: `codex-bridge: ${msg}`, type: limited ? "rate_limit_error" : "server_error" } }));
+    }
+    let actions = `\n\n---\n*Codex (${[model || "default model", sandbox, effort].filter(Boolean).join(" · ")})*`;
+    if (files.size) actions += `\n- files edited: ${[...files].map((f) => `\`${f}\``).join(", ")}`;
+    if (cmds.length) actions += `\n- commands: ${cmds.slice(0, 8).map((c) => `\`${c}\``).join(", ")}`;
+    if (sandbox === "read-only") actions += `\n- read-only mode (no edits made)`;
+    emit(actions);
+    state[convId] = { cwd, lastEnd: Date.now() };
+    saveState();
+    const u = usage || {};
+    const use = { prompt_tokens: u.input_tokens || 0, completion_tokens: u.output_tokens || 0 };
+    use.total_tokens = use.prompt_tokens + use.completion_tokens;
+    if (stream) { begin(); sse(res, chunk({}, "stop")); sse(res, { id, object: "chat.completion.chunk", created, model: body.model, choices: [], usage: use }); res.write("data: [DONE]\n\n"); return res.end(); }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ id, object: "chat.completion", created, model: body.model, choices: [{ index: 0, message: { role: "assistant", content: full }, finish_reason: "stop" }], usage: use }));
+  });
+}
+
 http.createServer((req, res) => {
   if (req.url === "/healthz") return res.end("ok");
   if (req.headers.authorization !== `Bearer ${BRIDGE_KEY}`) { res.writeHead(401); return res.end("unauthorized"); }
   if (req.method === "GET" && req.url.startsWith("/v1/models")) {
     res.writeHead(200, { "content-type": "application/json" });
-    return res.end(JSON.stringify({ object: "list", data: Object.keys(MODELS).map((id) => ({ id, object: "model", owned_by: "claude-code" })) }));
+    return res.end(JSON.stringify({ object: "list", data: [...Object.keys(MODELS), ...Object.keys(CODEX_MODELS)].map((id) => ({ id, object: "model", owned_by: id.startsWith("codex") ? "codex" : "claude-code" })) }));
   }
   if (req.method === "POST" && req.url.startsWith("/memory/write")) {
     let raw = "";
@@ -367,7 +466,7 @@ http.createServer((req, res) => {
     req.on("data", (d) => (raw += d));
     req.on("end", () => {
       let body; try { body = JSON.parse(raw); } catch { res.writeHead(400); return res.end("bad json"); }
-      handle(req, res, body).catch((e) => { if (!res.headersSent) res.writeHead(500); res.end(JSON.stringify({ error: { message: String(e) } })); });
+      (String(body.model || "").startsWith("codex-code-") ? handleCodex : handle)(req, res, body).catch((e) => { if (!res.headersSent) res.writeHead(500); res.end(JSON.stringify({ error: { message: String(e) } })); });
     });
     return;
   }

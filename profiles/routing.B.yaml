@@ -39,6 +39,9 @@ pins:
   gpt-oss:  {model: pool-gpt-oss-120b,   natural: true}
   nemotron: {model: pool-nemotron-ultra, natural: true}
   free:     {model: free-pool-coding}
+  gpt:      {model: gpt-main,  effort: medium, natural: true}
+  gpt-max:  {model: gpt-max,   effort: high}
+  gpt-mini: {model: gpt-mini}
 
 # Mid-task model switching (policy.py). The profile table above is the floor/ceiling: switching never leaves it.
 switching:

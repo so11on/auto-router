@@ -3,7 +3,9 @@
 //
 //   node ar.mjs doctor                  check Docker / Node / Claude CLI / VS Code and ports
 //   node ar.mjs init [options]          create .env (generated secrets), pick a routing profile, remember paths
-//   node ar.mjs keys                    which keys are set (names only, never values)
+//   node ar.mjs keys [--check]          which keys are set (names only); --check also asks each provider whether the key works
+//   node ar.mjs cloudflare-token       mint a Workers-AI-only token from a token that can only create tokens (see docs/GET-KEYS.md)
+//   node ar.mjs openai [options]        configure OpenAI: Codex CLI with your ChatGPT login and/or an OpenAI API key
 //   node ar.mjs up | down | status      start / stop / inspect the whole stack
 //   node ar.mjs omniroute               connect the free providers whose keys are in .env, verify models, build the combos
 //   node ar.mjs vscode [--uninstall]    add the Auto: models to VS Code and install the companion extension
@@ -123,6 +125,12 @@ async function doctor() {
     const m = v.match(/(\d+)\.(\d+)\.(\d+)/);
     if (m && (Number(m[1]) < 2 || (Number(m[1]) === 2 && (Number(m[2]) < 1 || (Number(m[2]) === 1 && Number(m[3]) < 280))))) warn("Claude Code < 2.1.280: Opus 5.5 will not work through the bridge — run `claude update`");
   } else warn("Claude Code CLI not found — only the Claude API key route (or no Claude) is possible. Install: https://docs.claude.com/claude-code");
+  const cx = which("codex");
+  if (cx) {
+    ok(`Codex CLI found (${run("codex", ["--version"]).stdout.trim()}) — enables the ChatGPT Plus/Pro route`);
+    const st = run("codex", ["login", "status"]);
+    (st.status === 0 ? ok : warn)(st.status === 0 ? "Codex is signed in" : "Codex is not signed in — run: codex login   (or: codex login --device-auth)");
+  } else info("Codex CLI not found (only needed to use ChatGPT Plus/Pro: npm i -g @openai/codex, then codex login)");
   const code = findCode();
   if (code) ok(`VS Code command line found (${code})`); else warn("VS Code `code` command not found — the extension must be installed by hand (Extensions view → … → Install from VSIX)");
   for (const [port, name] of [[4000, "gateway"], [20128, "OmniRoute"], [4100, "claude-bridge"]]) {
@@ -135,6 +143,7 @@ async function doctor() {
 
 // ---------------------------------------------------------------- init
 const KEY_LINKS = {
+  OPENAI_API_KEY: "OpenAI API (billed separately from ChatGPT Plus): https://platform.openai.com/api-keys",
   GEMINI_API_KEY: "Google AI Studio (project WITH billing): https://aistudio.google.com/apikey",
   GEMINI_FREE_API_KEY: "Google AI Studio → 'Create API key in new project' (NO billing): https://aistudio.google.com/apikey",
   ANTHROPIC_API_KEY: "Anthropic Console → Plans & Billing (credits) then API Keys: https://console.anthropic.com",
@@ -143,13 +152,16 @@ const KEY_LINKS = {
   MISTRAL_API_KEY: "https://console.mistral.ai/api-keys",
   OLLAMA_API_KEY: "https://ollama.com/settings/keys",
   NVIDIA_API_KEY: "https://build.nvidia.com (free NVIDIA Developer Program)",
+  CLOUDFLARE_API_TOKEN: "Cloudflare dashboard → Workers AI → Use REST API → create the Workers AI token (also shows CLOUDFLARE_ACCOUNT_ID): https://dash.cloudflare.com",
 };
 function init(flags) {
   const profile = String(flags.profile || "A").toUpperCase();
   const pf = path.join(ROOT, "profiles", `routing.${profile}.yaml`);
-  if (!fs.existsSync(pf)) { bad(`unknown profile ${profile} (use A, B, C or D — see profiles/)`); process.exit(1); }
+  if (!fs.existsSync(pf)) { bad(`unknown profile ${profile} (use A-F — see profiles/)`); process.exit(1); }
   const claude = String(flags.claude || "cli");
   if (!["cli", "api", "none"].includes(claude)) { bad("--claude must be cli, api or none"); process.exit(1); }
+  const openai = String(flags.openai || "cli");
+  if (!["cli", "api", "none"].includes(openai)) { bad("--openai must be cli, api or none"); process.exit(1); }
   const rootsRaw = flags.roots || flags.root;
   if (!rootsRaw || rootsRaw === true) {
     bad("--roots is required: the folder(s) where you keep code, e.g.  --roots \"" + path.join(os.homedir(), "code") + "\"");
@@ -169,7 +181,8 @@ function init(flags) {
     t = setEnvText(t, "OMNIROUTE_PASSWORD", crypto.randomBytes(12).toString("hex"));
     t = setEnvText(t, "BRIDGE_ALLOWED_ROOTS", roots.join(","));
     t = setEnvText(t, "CLAUDE_PRIMARY", claude === "api" ? "api" : "cli");
-    if (profile === "C" || profile === "D") t = setEnvText(t, "CLASSIFIER_MODEL", "pool");
+    t = setEnvText(t, "OPENAI_PRIMARY", openai === "api" ? "api" : "cli");
+    if (["C", "D", "F"].includes(profile)) t = setEnvText(t, "CLASSIFIER_MODEL", "pool");
     fs.writeFileSync(ENV_FILE, t, { mode: 0o600 });
     ok("created .env with generated secrets (permissions restricted)");
   }
@@ -186,15 +199,148 @@ function init(flags) {
   console.log("\nNext: put the keys you have into .env (leave the others empty). Where to get them:");
   for (const [k, v] of Object.entries(KEY_LINKS)) info(`${k.padEnd(20)} ${v}`);
   info("Claude subscription: nothing to create — just be logged in to the `claude` CLI.");
-  console.log("\nThen: node ar.mjs up   →   node ar.mjs omniroute   →   node ar.mjs vscode   →   node ar.mjs smoke");
+  info("ChatGPT Plus/Pro: nothing to create — install the Codex CLI and run `codex login` (then: node ar.mjs openai).");
+  info("Step-by-step for every key: docs/GET-KEYS.md   |   then verify them all: node ar.mjs keys --check");
+  console.log("\nThen: node ar.mjs keys --check   →   node ar.mjs up   →   node ar.mjs omniroute   →   (OpenAI: node ar.mjs openai)   →   node ar.mjs vscode   →   node ar.mjs smoke");
 }
 
-function keys() {
+const CHECKS = {
+  GEMINI_API_KEY: (k) => ["https://generativelanguage.googleapis.com/v1beta/models?pageSize=1", { "x-goog-api-key": k }],
+  GEMINI_FREE_API_KEY: (k) => ["https://generativelanguage.googleapis.com/v1beta/models?pageSize=1", { "x-goog-api-key": k }],
+  ANTHROPIC_API_KEY: (k) => ["https://api.anthropic.com/v1/models?limit=1", { "x-api-key": k, "anthropic-version": "2023-06-01" }],
+  OPENAI_API_KEY: (k) => ["https://api.openai.com/v1/models", { authorization: `Bearer ${k}` }],
+  GROQ_API_KEY: (k) => ["https://api.groq.com/openai/v1/models", { authorization: `Bearer ${k}` }],
+  OPENROUTER_API_KEY: (k) => ["https://openrouter.ai/api/v1/auth/key", { authorization: `Bearer ${k}` }],
+  MISTRAL_API_KEY: (k) => ["https://api.mistral.ai/v1/models", { authorization: `Bearer ${k}` }],
+  OLLAMA_API_KEY: (k) => ["https://ollama.com/v1/models", { authorization: `Bearer ${k}` }],
+  NVIDIA_API_KEY: (k) => ["https://integrate.api.nvidia.com/v1/models", { authorization: `Bearer ${k}` }],
+};
+const HINTS = {
+  401: "the provider says the key is wrong — copy it again from the key page (docs/GET-KEYS.md)",
+  403: "the key is not allowed (new keys can take a few minutes; or the project/plan lacks access)",
+  429: "rate limited right now, but the key itself was accepted",
+};
+async function keys(flags) {
   const e = readEnv();
   if (!e) return bad("no .env — run: node ar.mjs init");
-  const names = Object.keys(KEY_LINKS).concat(["CLOUDFLARE_API_TOKEN"]);
-  for (const k of names) console.log(`${(e[k] ? c(32, "set  ") : c(90, "empty"))}  ${k}`);
-  info(`CLAUDE_PRIMARY=${e.CLAUDE_PRIMARY}  FREE_POOL_ENABLED=${e.FREE_POOL_ENABLED}  CLASSIFIER_MODEL=${e.CLASSIFIER_MODEL}`);
+  for (const k of Object.keys(KEY_LINKS)) {
+    if (!e[k]) { console.log(`${c(90, "empty")}  ${k}`); continue; }
+    if (!flags.check || !CHECKS[k]) { console.log(`${c(32, "set  ")}  ${k}`); continue; }
+    const [url, headers] = CHECKS[k](e[k]);
+    const r = await http(url, { headers, timeout: 20000 });
+    if (r.status === 200 || r.status === 429) console.log(`${c(32, "works")}  ${k}${r.status === 429 ? " (rate limited now)" : ""}`);
+    else console.log(`${c(31, "FAILS")}  ${k}: HTTP ${r.status} — ${HINTS[r.status] || r.text.slice(0, 100)}`);
+  }
+  if (e.CLOUDFLARE_API_TOKEN || e.CLOUDFLARE_ACCOUNT_ID) {
+    if (!e.CLOUDFLARE_API_TOKEN || !e.CLOUDFLARE_ACCOUNT_ID) console.log(`${c(31, "FAILS")}  Cloudflare needs BOTH CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN`);
+    else if (!flags.check) console.log(`${c(32, "set  ")}  CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN`);
+    else console.log(await cloudflareCheck(e));
+  } else console.log(`${c(90, "empty")}  CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN`);
+  info(`CLAUDE_PRIMARY=${e.CLAUDE_PRIMARY}  OPENAI_PRIMARY=${e.OPENAI_PRIMARY}  FREE_POOL_ENABLED=${e.FREE_POOL_ENABLED}  CLASSIFIER_MODEL=${e.CLASSIFIER_MODEL}`);
+  if (flags.check) info("Subscriptions are checked by `node ar.mjs doctor` (claude / codex logged in?).");
+}
+async function cloudflareCheck(e) {
+  const r = await http(`https://api.cloudflare.com/client/v4/accounts/${e.CLOUDFLARE_ACCOUNT_ID}/ai/models/search?per_page=1`,
+    { headers: { authorization: `Bearer ${e.CLOUDFLARE_API_TOKEN}` }, timeout: 20000 });
+  if (r.status === 200 && r.json?.success) return `${c(32, "works")}  Cloudflare Workers AI (account + token)`;
+  const v = await http("https://api.cloudflare.com/client/v4/user/tokens/verify", { headers: { authorization: `Bearer ${e.CLOUDFLARE_API_TOKEN}` }, timeout: 15000 });
+  const tokenOk = v.json?.result?.status === "active";
+  const why = tokenOk
+    ? "the token is valid but is not allowed on this account/Workers AI: create it from the Workers AI page → Use REST API → template 'Workers AI', and copy the Account ID from that same page (docs/GET-KEYS.md)"
+    : "the token itself is not valid — create a new one (docs/GET-KEYS.md)";
+  return `${c(31, "FAILS")}  Cloudflare: HTTP ${r.status} ${(r.json?.errors?.[0]?.message) || ""} — ${why}`;
+}
+
+async function cloudflareToken() {
+  const e = readEnv();
+  if (!e?.CLOUDFLARE_API_TOKEN || !e?.CLOUDFLARE_ACCOUNT_ID) return bad("put CLOUDFLARE_ACCOUNT_ID and the current CLOUDFLARE_API_TOKEN in .env first");
+  const auth = { authorization: `Bearer ${e.CLOUDFLARE_API_TOKEN}` };
+  if ((await cloudflareCheck(e)).includes("works")) return ok("the current token already works with Workers AI — nothing to do");
+  const g = await http("https://api.cloudflare.com/client/v4/user/tokens/permission_groups", { headers: auth });
+  if (!g.json?.success) return bad("this token cannot list permissions, so it cannot create tokens either. Create the Workers AI token in the dashboard (docs/GET-KEYS.md).");
+  const ids = ["Workers AI Read", "Workers AI Write"].map((n) => g.json.result.find((x) => x.name === n)?.id);
+  if (ids.some((i) => !i)) return bad("could not find the Workers AI permission groups on this account");
+  const r = await http("https://api.cloudflare.com/client/v4/user/tokens", { method: "POST", headers: auth, body: {
+    name: "auto-router-workers-ai",
+    policies: [{ effect: "allow", resources: { [`com.cloudflare.api.account.${e.CLOUDFLARE_ACCOUNT_ID}`]: "*" }, permission_groups: ids.map((id) => ({ id })) }] } });
+  if (!r.json?.success) return bad(`Cloudflare refused: ${(r.json?.errors || []).map((x) => x.message).join("; ") || r.text.slice(0, 120)}`);
+  setEnv("CLOUDFLARE_API_TOKEN", r.json.result.value);
+  ok("created token 'auto-router-workers-ai' (Workers AI only, this account) and saved it in .env");
+  await sleep(3000);
+  console.log(await cloudflareCheck(readEnv()));
+  info("Now delete the old token in the Cloudflare dashboard (My Profile → API Tokens); it is no longer needed.");
+}
+
+// ---------------------------------------------------------------- openai
+const OPENAI_BEGIN = "  # >>> openai (managed by ar.mjs)", OPENAI_END = "  # <<< openai";
+const FB_BEGIN = "    # >>> openai-fallbacks (managed by ar.mjs)", FB_END = "    # <<< openai-fallbacks";
+export function openaiBlocks({ route, ids, hasGemini }) {
+  const tiers = ["mini", "main", "max"];
+  const models = [], fallbacks = [];
+  for (const t of tiers) {
+    if (route !== "api") models.push(`  - {model_name: gpt-${t}-cli, litellm_params: {model: openai/codex-code-${t}, api_base: http://host.docker.internal:4100/v1, api_key: os.environ/BRIDGE_KEY}}`);
+    if (route !== "cli") models.push(`  - {model_name: gpt-${t}-api, litellm_params: {model: openai/${ids[t]}, api_key: os.environ/OPENAI_API_KEY}}`);
+    const tail = hasGemini ? ", gemini-flash-lite" : "";
+    if (route === "both") {
+      fallbacks.push(`    - {gpt-${t}-cli: [gpt-${t}-api${tail}]}`, `    - {gpt-${t}-api: [gpt-${t}-cli${tail}]}`);
+    } else if (tail) fallbacks.push(`    - {gpt-${t}-${route}: [gemini-flash-lite]}`);
+  }
+  return { models: models.join("\n"), fallbacks: fallbacks.join("\n") };
+}
+export function applyBlocks(text, begin, end, body) {
+  const a = text.indexOf(begin), b = text.indexOf(end);
+  if (a < 0 || b < 0 || b < a) throw new Error(`marker ${begin.trim()} not found in config.yaml`);
+  return text.slice(0, a + begin.length) + "\n" + (body ? body + "\n" : "") + text.slice(b);
+}
+async function openai(flags) {
+  const e = readEnv();
+  if (!e) return bad("no .env — run: node ar.mjs init");
+  const hasCodex = Boolean(which("codex")), hasKey = Boolean(e.OPENAI_API_KEY);
+  if (flags.list) {
+    if (hasKey) {
+      const r = await http("https://api.openai.com/v1/models", { headers: { authorization: `Bearer ${e.OPENAI_API_KEY}` } });
+      if (r.status !== 200) return bad(`OpenAI API: HTTP ${r.status} ${r.text.slice(0, 120)}`);
+      const ids = (r.json.data || []).map((m) => m.id).filter((id) => /^(gpt|o\d|codex)/.test(id) && !/(audio|realtime|tts|transcribe|image|embedding|search|moderation)/.test(id)).sort();
+      console.log("Models this API key can use (chat-capable, filtered):"); ids.forEach((id) => info(id));
+    } else info("No OPENAI_API_KEY in .env, so the API model list is unavailable.");
+    if (hasCodex) info("Codex CLI models: run `codex`, type /model — the names listed there are the ones to pass to --mini/--main/--max. Leaving them empty uses Codex's default model.");
+    return;
+  }
+  const route = String(flags.route || (hasKey && hasCodex ? "both" : hasKey ? "api" : "cli"));
+  if (!["cli", "api", "both"].includes(route)) return bad("--route must be cli, api or both");
+  if (route !== "api" && !hasCodex) return bad("Codex CLI not found. Install it (npm i -g @openai/codex), run `codex login`, or use --route api with OPENAI_API_KEY.");
+  if (route !== "cli" && !hasKey) return bad("OPENAI_API_KEY is empty in .env (the API is billed separately from ChatGPT Plus). Use --route cli or add a key.");
+  if (route !== "api") {
+    const st = run("codex", ["login", "status"]);
+    if (st.status !== 0) warn("Codex is not signed in yet — run: codex login   (headless machine: codex login --device-auth)");
+    else ok("Codex is signed in");
+  }
+  const ids = { mini: flags.mini, main: flags.main, max: flags.max };
+  if (route !== "cli") for (const t of ["mini", "main", "max"]) if (!ids[t] || ids[t] === true) return bad(`--${t} <model id> is required for the API route (see: node ar.mjs openai --list)`);
+  if (flags.check) {
+    if (route !== "cli") for (const t of ["mini", "main", "max"]) {
+      const r = await http("https://api.openai.com/v1/chat/completions", { method: "POST", headers: { authorization: `Bearer ${e.OPENAI_API_KEY}` }, timeout: 60000,
+        body: { model: ids[t], messages: [{ role: "user", content: "Reply with one word: ok" }] } });
+      (r.status === 200 ? ok : bad)(`API ${ids[t]}: ${r.status === 200 ? "answers" : "HTTP " + r.status + " " + (r.json?.error?.message || "").slice(0, 100)}`);
+    }
+    if (route !== "api") {
+      const r = run("codex", ["exec", "--skip-git-repo-check", "--ephemeral", "--sandbox", "read-only", ...(ids.main && ids.main !== true ? ["-m", ids.main] : []), "Reply with one word: ok"], { timeout: 120000, input: "" });
+      (r.status === 0 ? ok : bad)(`Codex CLI: ${r.status === 0 ? "answers" : (r.stderr || r.stdout || "failed").slice(-200)}`);
+    }
+    return;
+  }
+  const cfgPath = path.join(ROOT, "litellm", "config.yaml");
+  let cfg = fs.readFileSync(cfgPath, "utf8");
+  const blocks = openaiBlocks({ route, ids, hasGemini: Boolean(e.GEMINI_API_KEY) });
+  cfg = applyBlocks(cfg, OPENAI_BEGIN, OPENAI_END, blocks.models);
+  cfg = applyBlocks(cfg, FB_BEGIN, FB_END, blocks.fallbacks);
+  fs.writeFileSync(cfgPath, cfg);
+  setEnv("OPENAI_PRIMARY", route === "api" ? "api" : "cli");
+  if (route !== "api") for (const [t, k] of [["mini", "CODEX_MODEL_MINI"], ["main", "CODEX_MODEL_MAIN"], ["max", "CODEX_MODEL_MAX"]]) setEnv(k, ids[t] && ids[t] !== true ? ids[t] : "");
+  ok(`OpenAI configured: route=${route}${route === "both" ? " (cli first, api as fallback)" : ""}`);
+  info("Models: " + (route === "api" || route === "both" ? `mini=${ids.mini} main=${ids.main} max=${ids.max}` : "Codex's default model for mini/main/max (set --mini/--main/--max to choose)"));
+  info("Use OpenAI in the profiles: node ar.mjs init --roots <folders> --profile E (with Gemini) or F (free pool only) — re-running init keeps your .env. Or add gpt-mini/gpt-main/gpt-max to litellm/routing.yaml. The pins !gpt, !gpt-max, !gpt-mini already work.");
+  info("Apply: node ar.mjs down && node ar.mjs up   (restarts the bridge and the gateway)");
 }
 
 // ---------------------------------------------------------------- bridge process
@@ -250,6 +396,21 @@ async function omniroute(flags) {
   const e = readEnv();
   if (!e) return bad("no .env — run: node ar.mjs init");
   if (!(await portOpen(20128))) return bad("OmniRoute is not running — run: node ar.mjs up");
+  const cf = Boolean(e.CLOUDFLARE_API_TOKEN && e.CLOUDFLARE_ACCOUNT_ID);
+  let cfOk = false;
+  if (cf) {
+    const msg = await cloudflareCheck(e);
+    if (msg.includes("works")) {
+      cfOk = true; ok("Cloudflare credentials work");
+      const inside = spawnSync("docker", ["compose", "exec", "-T", "omniroute", "printenv", "CLOUDFLARE_ACCOUNT_ID"], { cwd: ROOT, encoding: "utf8" }).stdout?.trim();
+      if (inside !== e.CLOUDFLARE_ACCOUNT_ID) {
+        warn("OmniRoute does not know the Cloudflare account id yet — recreating its container (data is kept)");
+        compose(["up", "-d", "--force-recreate", "omniroute"], { stdio: "ignore" });
+        for (let i = 0; i < 40 && !(await portOpen(20128)); i++) await sleep(1500);
+        await sleep(6000);
+      }
+    } else warn(msg.replace(/\x1b\[[0-9;]*m/g, "") + "\n  → Cloudflare is skipped for now; fix the credentials and rerun this command.");
+  }
   const login = await http(`${OMNI}/api/auth/login`, { method: "POST", body: { password: e.OMNIROUTE_PASSWORD } });
   const cookie = (login.headers.get("set-cookie") || "").split(";")[0];
   if (login.status !== 200 || !cookie) return bad(`OmniRoute login failed (${login.status}). If the container was created before init, recreate it: docker compose up -d --force-recreate omniroute`);
@@ -264,6 +425,7 @@ async function omniroute(flags) {
   }
 
   const want = PROVIDERS.filter(([k]) => e[k]).map(([k, id]) => [id, e[k]]);
+  if (cfOk) want.push(["cloudflare-ai", e.CLOUDFLARE_API_TOKEN]);
   if (!flags["no-llm7"]) want.push(["llm7", "unused"]);
   if (!want.length) return bad("no provider keys in .env yet (and --no-llm7 given) — add keys, then rerun");
   const have = (await api("/api/providers")).json?.connections || [];
@@ -285,6 +447,14 @@ async function omniroute(flags) {
 
   // verify every candidate model with a real request, keep the ones that answer
   const spec = JSON.parse(fs.readFileSync(path.join(ROOT, "profiles", "pool-models.json"), "utf8"));
+  if (cfOk && connIds["cloudflare-ai"]) { // Workers AI model ids are discovered, then verified like all others
+    const list = (await api(`/api/providers/${connIds["cloudflare-ai"]}/models`)).json?.models || [];
+    const prefs = [/llama-3\.3-70b/, /gpt-oss-120b/, /gpt-oss-20b/, /glm-4\.7/, /gemma-4/, /qwen.*coder/];
+    const picked = [];
+    for (const re of prefs) { const m = list.find((x) => re.test(x.id) && !picked.includes(x.id)); if (m) picked.push(m.id); }
+    for (const id of picked.slice(0, 4)) { spec["free-coding"].push(`cloudflare-ai/${id}`); spec["free-fast"].push(`cloudflare-ai/${id}`); }
+    info(`Cloudflare Workers AI candidates: ${picked.slice(0, 4).join(", ") || "none found"}`);
+  }
   const bearer = { authorization: `Bearer ${poolKey}` };
   const good = { "free-fast": [], "free-coding": [] };
   const probed = new Map();
@@ -477,8 +647,10 @@ function usage(flags) {
 const HELP = `auto-router — node ar.mjs <command>
 
   doctor      check Docker, Node, Claude CLI, VS Code, ports
-  init        --roots <folders> [--profile A|B|C|D] [--claude cli|api|none] [--force]
-  keys        show which keys are set
+  init        --roots <folders> [--profile A-F] [--claude cli|api|none] [--openai cli|api|none] [--force]
+  keys        [--check] show which keys are set; --check tests each one against its provider
+  cloudflare-token   fix "Authentication error" when CLOUDFLARE_API_TOKEN is a 'create tokens' token (docs/GET-KEYS.md)
+  openai      [--list] [--route cli|api|both] [--mini ID --main ID --max ID] [--check]   OpenAI via ChatGPT login (Codex CLI) and/or API key
   up | down | status
   omniroute   [--no-llm7]   connect free providers, verify models, build the combos
   vscode      [--uninstall] [--insiders] [--dir <path>]
@@ -486,7 +658,8 @@ const HELP = `auto-router — node ar.mjs <command>
   logs        [-f] [--errors] [--tail N] [--type T] [--rid ID] [--since 30m] [--raw]
   usage       [--since 24h|7d|all] [--by model|mode|task]
 
-Profiles: A Claude + billed Gemini + free pool | B Gemini only | C Claude + free pool | D free only`;
+Profiles: A Claude + billed Gemini + free pool | B Gemini only | C Claude + free pool | D free only
+          E OpenAI + billed Gemini + free pool | F OpenAI + free pool`;
 
 async function main() {
   const { flags, rest } = parseArgs(process.argv.slice(2));
@@ -494,7 +667,9 @@ async function main() {
   switch (cmd) {
     case "doctor": return doctor();
     case "init": return init(flags);
-    case "keys": return keys();
+    case "keys": return keys(flags);
+    case "openai": return openai(flags);
+    case "cloudflare-token": return cloudflareToken();
     case "up": return up(flags);
     case "down": return down();
     case "status": return status();

@@ -221,6 +221,47 @@ class Pins(unittest.TestCase):
         self.assertIn("pinned: opus", h._footer(req, "x", []))
 
 
+class OpenAI(unittest.TestCase):
+    def setUp(self):
+        h._sticky.clear()
+        h._last_model.clear()
+
+        async def fake(_text, *a, **k):
+            return {"task": "codegen", "complexity": 3}
+        h._classify = fake
+
+    def call(self, text):
+        data = {"model": "auto-smart", "messages": [{"role": "user", "content": text}]}
+        return run(h.proxy_handler_instance.async_pre_call_hook(None, None, data, "completion"))
+
+    def test_gpt_names_get_the_openai_route_suffix(self):
+        self.assertEqual(h._resolve("gpt-main"), "gpt-main-cli")
+        old = h.OPENAI_PRIMARY
+        h.OPENAI_PRIMARY = "api"
+        try:
+            self.assertEqual(h._resolve("gpt-max"), "gpt-max-api")
+            self.assertEqual(h._resolve("gpt-max-cli"), "gpt-max-cli")  # explicit suffix is kept
+        finally:
+            h.OPENAI_PRIMARY = old
+
+    def test_pin_to_gpt(self):
+        d = self.call("!gpt do the thing")
+        self.assertEqual((d["model"], d["reasoning_effort"]), ("gpt-main-cli", "medium"))
+        self.assertEqual(self.call("!gpt-max big refactor")["model"], "gpt-max-cli")
+
+    def test_pin_to_model_that_is_not_configured_is_ignored_with_a_note(self):
+        old = h._configured
+        h._configured = lambda name: not name.startswith("gpt-")
+        try:
+            d = self.call("!gpt do the thing")
+        finally:
+            h._configured = old
+        meta = d["metadata"]["auto_router"]
+        self.assertIsNone(meta["pinned"])
+        self.assertIn("not configured", meta["pin_note"])
+        self.assertNotIn("!gpt", d["messages"][0]["content"])
+
+
 class Footer(unittest.TestCase):
     ROUTE = {"metadata": {"auto_router": {"requested": "auto-free", "model": "free-pool-fast", "task": "explain",
                                           "complexity": 1, "effort": None, "t0": 0}}}

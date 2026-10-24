@@ -1,12 +1,11 @@
 {
-  "_comment": "Models the installer tries to put in the OmniRoute combos, in priority order. Each is probed with a real request before it is kept. Verified on 2026-10-24; free tiers rotate, so the probe decides. Format: <omniroute provider>/<model id as the provider names it>.",
+  "_comment": "Models the installer tries to put in the OmniRoute combos, in priority order. Each is probed with a real request before it is kept. Verified on 2026-10-24 (OpenRouter's minimax :free model returned 404 and was removed); free tiers rotate, so the probe decides. Format: <omniroute provider>/<model id as the provider names it>.",
   "free-fast": [
     "groq/openai/gpt-oss-20b",
     "groq/qwen/qwen3.8-27b",
     "llm7/DeepSeek-V4-Flash-0731",
     "ollama-cloud/gemma4:31b",
-    "ollama-cloud/nemotron-3-super",
-    "openrouter/minimax/minimax-m3.1-flash:free"
+    "ollama-cloud/nemotron-3-super"
   ],
   "free-coding": [
     "groq/openai/gpt-oss-120b",

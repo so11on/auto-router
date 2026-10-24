@@ -61,3 +61,12 @@ immediate failure can still return a proper HTTP error.
 - Output token usage is reported as 0.
 - Only Chat Completions is implemented; LiteLLM converts Responses/Messages requests.
 - Terms of service: see [SECURITY.md](SECURITY.md).
+
+## OpenAI Codex route (ChatGPT Plus/Pro)
+The same server also exposes `codex-code-mini|main|max`. A request for those models runs `codex exec --json --skip-git-repo-check --ephemeral --sandbox <mode> -C <workspace> [-m model] [-c model_reasoning_effort="…"] -`
+with the prompt on stdin, using the user's own `codex login` (ChatGPT account). `OPENAI_API_KEY`/`CODEX_API_KEY`/`OPENAI_BASE_URL` are removed from the child's environment so the plan, not an API key, is used.
+- **Sandbox:** `workspace-write` when the request carries tools (Copilot Agent), otherwise `read-only` (override with header `x-codex-sandbox`).
+- **No session resume:** every turn is a fresh Codex session; the last 12 turns and files changed on disk since the previous turn are replayed in the prompt. (`codex exec resume` flags differ from `exec`; not used.)
+- **Output:** the final `agent_message` text, then `*Codex (model · sandbox · effort)*` with files edited / commands run, like the Claude route. Token usage comes from `turn.completed`.
+- **Limits:** a message containing limit/quota/usage/credits becomes HTTP 429 (gateway falls back); after partial text the stream is broken on purpose so the gateway continues on another model.
+- **Status:** the JSON event shapes follow OpenAI's non-interactive-mode documentation; no real `codex` was available on the development machine, so the route is verified against a stand-in CLI (`tests/fake_codex.sh`, `tests/bridge.test.mjs`) and by `node ar.mjs openai --check` on your machine.

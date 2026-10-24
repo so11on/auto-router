@@ -13,6 +13,7 @@
 ## Docs
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): components, request flow, state, failure behaviour
 - [docs/ROUTING.md](docs/ROUTING.md): classification, tier table, stickiness, effort mapping
+- [docs/GET-KEYS.md](docs/GET-KEYS.md): step-by-step links and instructions for every key and subscription login
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md): env vars and config files
 - [docs/CLAUDE-BRIDGE.md](docs/CLAUDE-BRIDGE.md): Claude Code bridge, workspace detection, smooth model switching
 - [docs/FREE-TIER-LIMITS.md](docs/FREE-TIER-LIMITS.md): measured free models, limits and latency (2026-10-20)

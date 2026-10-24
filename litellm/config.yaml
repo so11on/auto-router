@@ -53,6 +53,11 @@ model_list:
   # --- test fixture for the mid-stream failover test (scripts/flaky_server.py) ---
   - {model_name: test-flaky, litellm_params: {model: openai/flaky, api_base: 'http://host.docker.internal:4199/v1', api_key: x}}
 
+  # --- OpenAI: "cli" = Codex CLI with your ChatGPT Plus/Pro login (via the bridge), "api" = OpenAI API key (billed separately) ---
+  # This block is written by `node ar.mjs openai` once the model ids are verified; the hook appends -cli / -api from OPENAI_PRIMARY.
+  # >>> openai (managed by ar.mjs)
+  # <<< openai
+
   # --- virtual models shown in the VS Code picker; the hook rewrites them ---
   - model_name: auto-free
     litellm_params: {model: openai/free-fast, api_base: os.environ/FREE_POOL_BASE, api_key: os.environ/FREE_POOL_KEY, timeout: 15, num_retries: 0}
@@ -70,6 +75,8 @@ router_settings:
     - {free-pool-coding: [gemini-free-flash-lite]}
     - {free-pool-fast: [gemini-free-flash-lite]}
     - {test-flaky: [gemini-flash-lite]}
+    # >>> openai-fallbacks (managed by ar.mjs)
+    # <<< openai-fallbacks
     - {pool-deepseek: [free-pool-coding]}
     - {pool-gpt-oss-120b: [free-pool-coding]}
     - {pool-nemotron-ultra: [free-pool-coding]}

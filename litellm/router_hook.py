@@ -36,6 +36,7 @@ CLASSIFIER_MODEL = os.environ.get("CLASSIFIER_MODEL", "gemini/gemini-3.5-flash-l
 STICKY_TTL = 60 * 60
 FREE_POOL_ENABLED = os.environ.get("FREE_POOL_ENABLED", "false").lower() == "true"  # needs provider keys in OmniRoute
 CLAUDE_PRIMARY = os.environ.get("CLAUDE_PRIMARY", "cli")  # cli = Claude Code bridge, api = Anthropic API
+OPENAI_PRIMARY = os.environ.get("OPENAI_PRIMARY", "cli")  # cli = Codex CLI with a ChatGPT login (via the bridge), api = OpenAI API key
 USAGE_FILE = os.environ.get("USAGE_FILE", "/app/data/usage.jsonl")
 EVENT_FILE = os.environ.get("EVENT_LOG", "/app/data/router.jsonl")
 MAX_LOG_BYTES = 10_000_000
@@ -404,9 +405,23 @@ def _wants_footer(request_data: dict) -> bool:
 def _resolve(name: str) -> str:
     if name.startswith("claude-") and not name.endswith(("-cli", "-api")):
         name = f"{name}-{CLAUDE_PRIMARY}"
+    if name.startswith("gpt-") and not name.endswith(("-cli", "-api")):
+        name = f"{name}-{OPENAI_PRIMARY}"
     if name.startswith("free-pool") and not FREE_POOL_ENABLED:
         name = FREE_FALLBACK_MODEL
     return name
+
+
+def _configured(name: str) -> bool:
+    """Is this model group actually defined in the running gateway? (falls back to the registry in tests)"""
+    try:
+        from litellm.proxy import proxy_server
+        router = getattr(proxy_server, "llm_router", None)
+        if router is not None and hasattr(router, "model_names"):
+            return name in router.model_names
+    except Exception:
+        pass
+    return name in registry.names()
 
 
 def _track_quota(kwargs: dict, response_obj, ok: bool) -> None:
@@ -633,6 +648,11 @@ class AutoRouter(CustomLogger):
         # ---- 1. which model (pin, sticky, or (re)classify with hysteresis) ----
         source, reason, pin_note, switched = "sticky", "", None, False
         pin = _find_pin(_text(last.get("content")), routing.get("pins", {})) if new_user_turn else None
+        if pin and not _configured(_resolve(pin[1]["model"])):
+            pin_note = f"ignored: {pin[0]} is not configured on this install"
+            if pin[2]:
+                last["content"] = _remove_text(last["content"], pin[2])
+            pin = None
         if pin and mode == "free" and not _is_free_model(pin[1]["model"]):
             pin_note = f"ignored: auto-free never uses paid models ({pin[0]})"
             if pin[2]:

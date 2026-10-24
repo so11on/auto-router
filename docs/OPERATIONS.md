@@ -66,6 +66,10 @@ Notes: the classifier's own calls are listed as `classifier`; failed attempts co
 the CLI's result event (mostly its own system prompt and cache) and say nothing about your plan's remaining allowance,
 which Anthropic does not expose to this tool.
 
+## OpenAI / ChatGPT
+`node ar.mjs openai --list` (models your API key can use), `node ar.mjs openai --route cli|api|both [--mini ID --main ID --max ID] --check` (verifies with real requests), then the same command without `--check`, then `node ar.mjs down && node ar.mjs up`.
+ChatGPT Plus/Pro → Codex CLI route (`codex login`); API key → separate billing. Details: docs/GET-KEYS.md, docs/CLAUDE-BRIDGE.md.
+
 ## Choosing a specific model
 Put `!opus`, `!sonnet`, `!haiku`, `!pro`, `!flash`, `!deepseek`, `!gpt-oss`, `!nemotron` (or `model:opus`) in the message, or say "usando o Opus" / "using Opus".
 Details and rules: ROUTING.md, "Pinning a model for one turn". **Opus through the CLI route needs Claude Code ≥ 2.1.280** (2.1.72 answered "does not support this model"). Updated on 2026-10-20 to 2.1.304: haiku, sonnet and opus

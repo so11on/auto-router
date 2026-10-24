@@ -6,7 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseEnv, setEnvText, patchProviders, buildProvider, vscodeUserDir } from "../ar.mjs";
+import { parseEnv, setEnvText, patchProviders, buildProvider, vscodeUserDir, openaiBlocks, applyBlocks } from "../ar.mjs";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -35,6 +35,33 @@ test("patchProviders adds, replaces and removes only auto-router", () => {
   assert.deepEqual(out.map((x) => x.name), ["Gemini"]);
   assert.equal(JSON.parse(patchProviders("", p)).length, 1);
   assert.throws(() => patchProviders("// comment\n[]", p), /plain JSON/);
+});
+
+test("openai blocks: routes, fallbacks and managed markers in config.yaml", () => {
+  const ids = { mini: "m-mini", main: "m-main", max: "m-max" };
+  const both = openaiBlocks({ route: "both", ids, hasGemini: true });
+  assert.match(both.models, /gpt-main-cli.*openai\/codex-code-main.*host\.docker\.internal:4100/);
+  assert.match(both.models, /gpt-max-api.*openai\/m-max.*OPENAI_API_KEY/);
+  assert.match(both.fallbacks, /gpt-main-cli: \[gpt-main-api, gemini-flash-lite\]/);
+  const cli = openaiBlocks({ route: "cli", ids: {}, hasGemini: false });
+  assert.ok(!cli.models.includes("-api"));
+  assert.equal(cli.fallbacks, "");
+  const cfg = fs.readFileSync(path.join(ROOT, "litellm", "config.yaml"), "utf8");
+  const begin = "  # >>> openai (managed by ar.mjs)", end = "  # <<< openai";
+  const out = applyBlocks(applyBlocks(cfg, begin, end, both.models), "    # >>> openai-fallbacks (managed by ar.mjs)", "    # <<< openai-fallbacks", both.fallbacks);
+  assert.ok(out.includes("gpt-mini-api") && out.includes("- {gpt-max-api: [gpt-max-cli"));
+  assert.equal(applyBlocks(out, begin, end, "").includes("model_name: gpt-mini-api"), false, "re-applying replaces the block");
+  assert.throws(() => applyBlocks("no markers", begin, end, "x"), /not found/);
+});
+
+test("profiles A-F exist, are valid, and every model they name is defined or a known family", () => {
+  for (const p of "ABCDEF") {
+    const t = fs.readFileSync(path.join(ROOT, "profiles", `routing.${p}.yaml`), "utf8");
+    assert.match(t, /modes:/);
+    assert.match(t, /pins:/);
+  }
+  assert.match(fs.readFileSync(path.join(ROOT, "profiles", "routing.E.yaml"), "utf8"), /gpt-max/);
+  assert.ok(!/claude-/.test(fs.readFileSync(path.join(ROOT, "profiles", "routing.F.yaml"), "utf8").split("# Pins:")[0].split("modes:")[1]));
 });
 
 test("vscodeUserDir is OS specific and ends with User", () => {
@@ -75,7 +102,7 @@ test("fresh install: init creates .env with generated secrets, profile and local
 });
 
 test("no personal data or secrets are shipped", () => {
-  const bad = [/so11on/i, /sollon/i, /limarj/i, /\/Users\/[a-z0-9]+/i, /C:\\Users\\[a-z0-9]+/i, /sk-[A-Za-z0-9]{24,}/, /AIza[0-9A-Za-z_-]{30}/, /gsk_[A-Za-z0-9]{20,}/, /nvapi-/, /sk-ant-/, /ghp_[A-Za-z0-9]{20,}/];
+  const bad = [/so11on/i, /sollon/i, /limarj/i, /\/Users\/[a-z0-9]+/i, /C:\\Users\\[a-z0-9]+/i, /sk-[A-Za-z0-9]{24,}/, /AIza[0-9A-Za-z_-]{30}/, /gsk_[A-Za-z0-9]{20,}/, /nvapi-[A-Za-z0-9_-]{20,}/, /sk-ant-[A-Za-z0-9_-]{20,}/, /sk-or-[A-Za-z0-9_-]{20,}/, /ghp_[A-Za-z0-9]{20,}/];
   const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap((x) => {
     const p = path.join(d, x.name);
     if (/^(\.git|data|node_modules|\.auto-router)$/.test(x.name) || /^\.env(\.bak)?$/.test(x.name) || x.name.endsWith(".vsix") || p.endsWith(path.join("tests", "ar.test.mjs"))) return [];

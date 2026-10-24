@@ -19,6 +19,10 @@
 | `FREE_POOL_ENABLED` | hook | `true` (current) uses the OmniRoute combos; `false` routes pool tiers to the Gemini free tier. Default when unset: `false`. |
 | `OMNIROUTE_PASSWORD` | OmniRoute | Dashboard password (seeded through `INITIAL_PASSWORD`). |
 | `GROQ_API_KEY`, `OPENROUTER_API_KEY`, `MISTRAL_API_KEY`, `OLLAMA_API_KEY`, `NVIDIA_API_KEY`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` | operator | Free-provider keys to add in the OmniRoute dashboard. Not read by any service directly. |
+| `OPENAI_API_KEY` | LiteLLM | OpenAI API key (`gpt-*-api`); billed separately from ChatGPT Plus/Pro. |
+| `OPENAI_PRIMARY` | hook | `cli` (default: Codex CLI with your ChatGPT login, through the bridge) or `api` (OpenAI API key). |
+| `CODEX_MODEL_MINI`, `CODEX_MODEL_MAIN`, `CODEX_MODEL_MAX` | bridge | Model ids passed to `codex exec -m` for the cli route; empty = Codex's default. Written by `node ar.mjs openai`. |
+| `CODEX_BIN`, `CODEX_AGENT_SANDBOX` | bridge | Codex binary (default `codex`) and the sandbox used when a request carries tools (default `workspace-write`; requests without tools use `read-only`). |
 | `CLAUDE_PRIMARY` | hook | `cli` (default, Claude Code bridge) or `api` (Anthropic API). |
 | `CLASSIFIER_MODEL` | hook | LiteLLM model string for classification (default `gemini/gemini-3.5-flash-lite`). |
 | `USAGE_FILE` | hook | Usage log path inside the container (default `/app/data/usage.jsonl`, mounted from `./data`). |
@@ -63,3 +67,8 @@ are never used because the hook rewrites `model` first). They exist so the names
 ## Fixtures
 `test-flaky` in `config.yaml` points at `scripts/flaky_server.py` (port 4199) and exists only for the mid-stream failover test.
 It is harmless when the fixture server is not running.
+
+## OpenAI blocks in `config.yaml`
+`node ar.mjs openai` rewrites two marker-delimited blocks in `litellm/config.yaml` (`# >>> openai … # <<< openai` and `# >>> openai-fallbacks … # <<< openai-fallbacks`):
+`gpt-{mini,main,max}-cli` → the bridge (`openai/codex-code-{mini,main,max}`) and `gpt-{mini,main,max}-api` → `openai/<id you verified>`. Do not edit between the markers by hand;
+rerun the command instead. Routing tables refer to `gpt-mini`, `gpt-main`, `gpt-max` (no suffix); the hook appends `-cli`/`-api` from `OPENAI_PRIMARY`.

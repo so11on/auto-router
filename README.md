@@ -2,7 +2,7 @@
 
 Pick **one** model name in VS Code Copilot Chat — **Auto: Free**, **Auto: Balanced** or **Auto: Smart** — and a local gateway chooses the
 actual model for each request, sets the reasoning effort, switches model during a task when the work gets harder or easier, falls back when a
-provider fails or runs out of quota, and keeps your context under control (memory file + automatic new chat when the context is nearly full).
+provider fails or runs out of quota (Claude, OpenAI/ChatGPT, Gemini and a pool of free providers), and keeps your context under control (memory file + automatic new chat when the context is nearly full).
 
 ```
 VS Code Copilot Chat ──► gateway (LiteLLM, Docker) ──► free pool (Groq, OpenRouter, Mistral, Ollama, NVIDIA, LLM7 via OmniRoute)
@@ -20,16 +20,18 @@ VS Code Copilot Chat ──► gateway (LiteLLM, Docker) ──► free pool (Gr
 git clone <this repository> && cd auto-router
 node ar.mjs doctor                       # checks Docker, Node, Claude CLI, VS Code
 node ar.mjs init --roots "<your code folder>"       # creates .env with generated secrets
-# put the keys you have into .env (node ar.mjs keys shows where to get them) — none are mandatory
+# put the keys you have into .env — step by step with links: docs/GET-KEYS.md — none are mandatory
+node ar.mjs keys --check                 # tells you which keys work
 node ar.mjs up                           # starts everything
 node ar.mjs omniroute                    # connects free providers, tests each model, builds the free pool
+node ar.mjs openai                       # (only if you use ChatGPT Plus/Pro via Codex, or an OpenAI key)
 node ar.mjs vscode                       # adds Auto: Free/Balanced/Smart to VS Code + status-bar extension
 node ar.mjs smoke                        # one real request per profile
 ```
 Then in VS Code: **Developer: Reload Window** → open Copilot Chat → pick **Auto: …** in the model picker.
 
 Requirements: [Docker](https://docs.docker.com/get-docker/), [Node.js ≥ 18](https://nodejs.org), VS Code ≥ 1.122 with GitHub Copilot Chat.
-Optional: the [Claude Code CLI](https://docs.claude.com/claude-code) (use your Claude subscription), Python 3.9+ (only for `tests/` and two dev tools).
+Optional: the [Claude Code CLI](https://docs.claude.com/claude-code) (use your Claude subscription), the [Codex CLI](https://developers.openai.com/codex) (use your ChatGPT Plus/Pro plan), Python 3.9+ (only for `tests/` and two dev tools).
 
 ## What you get
 | Profile | Behaviour |
@@ -49,7 +51,8 @@ Optional: the [Claude Code CLI](https://docs.claude.com/claude-code) (use your C
 ## Cost and privacy — read this
 - `Auto: Balanced` and `Auto: Smart` can spend **your** money (Gemini billed key, Anthropic API) or your **Claude plan allowance**. `Auto: Free` cannot.
 - Free providers may log prompts or use them for training (Gemini free tier, OpenRouter `:free`, LLM7, NVIDIA trial, Mistral free). Do not send confidential code through `Auto: Free`.
-- Using a Claude **subscription** through the bridge runs the official `claude` program as you; Anthropic's rules for subscriptions in automated setups may change. See [docs/SECURITY.md](docs/SECURITY.md).
+- Using a Claude **subscription** (Claude Code) or a ChatGPT **plan** (Codex CLI) through the bridge runs the official program as you; the vendors' rules for subscriptions in automated setups may change. See [docs/SECURITY.md](docs/SECURITY.md).
+- **ChatGPT Plus/Pro does not include OpenAI API access** (the API is billed separately). With a plan, GPT is reached through the Codex terminal tool, like Claude through Claude Code.
 - Everything runs on your computer and listens on `127.0.0.1` only. Your keys stay in `.env` (never committed). The gateway key is also written into VS Code's user file (plain text, loopback-only).
 
 ## Status
@@ -57,7 +60,7 @@ Developed and verified on **macOS** (2026-10). The code is written to be portabl
 tested** — `node ar.mjs doctor` and `node ar.mjs smoke` tell you quickly if something is off; please report problems. Free-tier models rotate: `node ar.mjs omniroute` re-tests them.
 
 ## Documentation
-[INSTALL_WITH_AI.md](INSTALL_WITH_AI.md) (AI-driven install) · [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/ROUTING.md](docs/ROUTING.md) · [docs/CONFIGURATION.md](docs/CONFIGURATION.md) ·
+[INSTALL_WITH_AI.md](INSTALL_WITH_AI.md) (AI-driven install) · [docs/GET-KEYS.md](docs/GET-KEYS.md) (every key, step by step) · [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/ROUTING.md](docs/ROUTING.md) · [docs/CONFIGURATION.md](docs/CONFIGURATION.md) ·
 [docs/OPERATIONS.md](docs/OPERATIONS.md) · [docs/CLAUDE-BRIDGE.md](docs/CLAUDE-BRIDGE.md) · [docs/FREE-TIER-LIMITS.md](docs/FREE-TIER-LIMITS.md) · [docs/VSCODE-SETUP.md](docs/VSCODE-SETUP.md) ·
 [docs/SECURITY.md](docs/SECURITY.md) · [docs/TESTING.md](docs/TESTING.md) · [docs/DECISIONS.md](docs/DECISIONS.md) · [docs/INSTALL-LESSONS.md](docs/INSTALL-LESSONS.md) · [AGENTS.md](AGENTS.md)
 
@@ -66,8 +69,8 @@ tested** — `node ar.mjs doctor` and `node ar.mjs smoke` tell you quickly if so
 ar.mjs                    installer and control script (doctor, init, up, down, omniroute, vscode, smoke, logs, usage)
 docker-compose.yml        gateway (LiteLLM) + OmniRoute
 litellm/                  config.yaml (models, fallbacks), routing.yaml (profile tables), models.yaml (windows, limits), hook modules
-profiles/                 routing profiles A-D and the list of free-pool models to verify
-claude-bridge/            Node server that exposes your Claude Code login as an OpenAI-style endpoint
+profiles/                 routing profiles A-F and the list of free-pool models to verify
+claude-bridge/            Node server that exposes your Claude Code and Codex (ChatGPT) logins as OpenAI-style endpoints
 vscode-extension/         companion extension (status bar, automatic new chat) + prebuilt .vsix
 templates/hooks/          optional VS Code agent hook (SessionStart → project memory)
 tests/                    Python unit tests (hook modules) and Node tests (installer)

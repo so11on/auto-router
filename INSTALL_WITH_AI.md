@@ -34,7 +34,8 @@ Fix every ✘ before going on: Docker must be installed **and running** (https:/
 ## Step 2 — Interview the user (ask all of these in ONE message, then wait)
 1. **Where do you keep your code?** (a folder path; several allowed). → `--roots`. This is the only place Claude Code is allowed to edit.
 2. **Which paid AI services do you use?**
-   - *Claude:* a **subscription** (Pro/Max) used through the `claude` command → profile with `--claude cli`; an **API key with credits** → `--claude api`; none → `--claude none`.
+   - *Claude:* a **subscription** (Pro/Max) used through the `claude` command → `--claude cli`; an **API key with credits** → `--claude api`; none → `--claude none`.
+   - *OpenAI / ChatGPT:* a **ChatGPT Plus/Pro subscription** → used through the **Codex CLI** terminal tool (`--openai cli`); an **OpenAI API key with credits** (a separate product and bill — Plus does **not** include API) → `--openai api`; none → `--openai none`.
    - *Google Gemini:* a key from a project **with billing**? (yes/no)
 3. **May their prompts go to free AI services that can log or train on them?** (Gemini free tier, OpenRouter free models, LLM7, NVIDIA trial.) If **no**: skip those providers (tell them Auto: Free will then have fewer models) and use `--no-llm7`.
 4. **Which free accounts will they create?** Groq, OpenRouter, Mistral, Ollama Cloud, NVIDIA (all optional; more = more resilient). Each takes ~2 minutes at the links printed by `init`.
@@ -44,22 +45,28 @@ Pick the profile:
 | Situation | `--profile` |
 |---|---|
 | Claude **and** a billed Gemini key | `A` |
-| Billed Gemini key, no Claude | `B` |
+| Billed Gemini key, no Claude/OpenAI | `B` |
 | Claude, no billed Gemini | `C` |
 | Only free providers | `D` |
+| OpenAI (ChatGPT login or API) **and** a billed Gemini key | `E` |
+| OpenAI, no billed Gemini | `F` |
+(Mixing Claude and OpenAI: pick `A` or `E`, then edit `litellm/routing.yaml` — each tier is one line; `!gpt`, `!opus` … pins work for whatever is configured.)
 
 ## Step 3 — Create the configuration
 ```sh
-node ar.mjs init --roots "<folder(s) from question 1>" --profile <A|B|C|D> --claude <cli|api|none>
+node ar.mjs init --roots "<folder(s) from question 1>" --profile <A|B|C|D|E|F> --claude <cli|api|none> --openai <cli|api|none>
 ```
 This creates `.env` (secrets generated for the user), activates the routing profile, and remembers the folder for the VS Code extension.
-Then tell the user the key names and links from the output, and ask them to paste **only the keys they have** into `.env` and **save the file**. Check with:
+Then walk the user through **`docs/GET-KEYS.md`** — it has numbered steps and links for every key (Claude, OpenAI/Codex, Gemini free and paid, Groq, OpenRouter, Mistral, Ollama Cloud, NVIDIA, Cloudflare, LLM7). Do one provider at a time, in their language; ask them to paste **only the keys they have** into `.env` and **save the file**. Check them all against the real providers:
 ```sh
-node ar.mjs keys
+node ar.mjs keys --check
 ```
+A `FAILS` line says what is wrong; fix it before going on. For Claude/ChatGPT **subscriptions** there is no key: `node ar.mjs doctor` shows whether `claude` / `codex` are installed and signed in (`codex login`, or `codex login --device-auth` without a browser).
 Key notes (tell the user only what is relevant):
 - `GEMINI_API_KEY` = project **with** billing; `GEMINI_FREE_API_KEY` = a **different** key from a project **without** billing. Never the same key twice.
 - A Claude **subscription** needs no key: the user must be logged in to the `claude` command (`claude` → `/login`). `ANTHROPIC_API_KEY` is only for the API route and needs credits ("credit balance too low" means none).
+- ChatGPT Plus does not include API credit. A user with Plus only → Codex CLI route, no key. A user who also wants the API must create a separate OpenAI API account with billing.
+- Cloudflare needs **both** the Account ID and a **Workers AI** token from the same dashboard page; a "user ID" or a token made from the "create tokens" template does not work (`node ar.mjs cloudflare-token` repairs the latter).
 - Nothing is mandatory. With no keys at all, `omniroute` still connects LLM7 (keyless) so Auto: Free works at a basic level.
 
 ## Step 4 — Start
@@ -76,6 +83,15 @@ docker compose up -d --force-recreate litellm
 This logs in to OmniRoute, registers every provider whose key is in `.env`, **sends a real test request to every candidate model**, keeps only the ones that answer, builds the
 `free-fast` and `free-coding` pools and sets `FREE_POOL_ENABLED=true`. Read its output to the user: which providers connected, which models were dropped and why.
 (Free tiers rotate models; dropping some is normal. A provider with a rejected key: ask the user to re-check that key.)
+
+## Step 5b — OpenAI (only if the user has ChatGPT Plus/Pro via Codex, or an OpenAI key)
+```sh
+node ar.mjs openai --list                      # API: shows the models the key can use; Codex: tells how to see its model names
+node ar.mjs openai --route <cli|api|both> [--mini ID --main ID --max ID] --check     # verifies with a real request
+node ar.mjs openai --route <cli|api|both> [--mini ID --main ID --max ID]             # writes the configuration
+node ar.mjs down && node ar.mjs up
+```
+Never guess model ids: the `--check` call must answer. With the CLI route and no ids, Codex's own default model is used for all three tiers.
 
 ## Step 6 — VS Code
 ```sh
@@ -96,7 +112,7 @@ any failing upstream call. Then ask the user to send one easy and one hard quest
 `auto-router · auto-balanced → gemini-flash · … · ctx 3%` showing the model used.
 
 ## Step 8 — Hand over (tell the user)
-- **Choose a profile:** model picker in Copilot Chat. **Force a model:** write `!opus`, `!sonnet`, `!haiku`, `!pro`, `!flash`, `!deepseek`, `!gpt-oss` or `model:opus` (or "usando o Opus") in the message.
+- **Choose a profile:** model picker in Copilot Chat. **Force a model:** write `!opus`, `!sonnet`, `!haiku`, `!gpt`, `!gpt-max`, `!pro`, `!flash`, `!deepseek`, `!gpt-oss` or `model:opus` (or "usando o Opus") in the message; a pin to something not configured is ignored with a note.
 - **Commands:** `node ar.mjs up | down | status | logs | usage | keys | smoke`. The stack does not start by itself after a reboot: run `node ar.mjs up` first.
 - **Costs/privacy:** Balanced and Smart can spend their money or Claude allowance; Auto: Free cannot. Free providers may log prompts. Everything is local (127.0.0.1).
 - **Honest limits to mention:** developed and verified on macOS; Windows/Linux were not tested by the author. Mid-answer continuation works for streaming chat only. The "new chat" automation uses VS Code commands that are not officially documented; if it does not open a chat, the extension copies the continuation text to the clipboard.
@@ -109,6 +125,8 @@ any failing upstream call. Then ask the user to send one easy and one hard quest
 | VS Code shows an error immediately | `node ar.mjs status` (stack up?), `node ar.mjs logs --errors`. A 401 means the gateway key in VS Code differs from `.env`: rerun `node ar.mjs vscode`, reload the window. |
 | Auto: Free answers slowly (~20 s) | The free pool is empty/disabled and it fell back to Gemini's free tier. Rerun `node ar.mjs omniroute`, then recreate litellm. |
 | `!opus` falls back to Sonnet | Claude Code too old: `claude update`, then `node ar.mjs down && node ar.mjs up`. |
+| Cloudflare "Authentication error" | Wrong token type or a user ID instead of the Account ID — see `docs/GET-KEYS.md` (Cloudflare traps) or run `node ar.mjs cloudflare-token`. |
+| `!gpt` says "not configured" | Run `node ar.mjs openai …` (Step 5b) and restart. |
 | "credit balance is too low" | The Anthropic API route is being used with no credits: use the subscription (`CLAUDE_PRIMARY=cli` + logged-in `claude`) or add credits. |
 | Windows: bridge does not start | Check `data/bridge.log`; make sure `claude` is on PATH (`where claude`). |
 | Anything else | `docs/INSTALL-LESSONS.md` lists every problem met so far with its fix. |

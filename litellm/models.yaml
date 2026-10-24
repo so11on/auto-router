@@ -38,4 +38,12 @@ models:
   claude-sonnet-api: {context: 1000000, paid: true, quota: none}
   claude-opus-api:   {context: 1000000, paid: true, quota: none}
 
+  # --- OpenAI: windows are conservative defaults; `node ar.mjs openai` can override them ---
+  gpt-mini-cli: {context: 128000, quota: none}
+  gpt-main-cli: {context: 128000, quota: none}
+  gpt-max-cli:  {context: 128000, quota: none}
+  gpt-mini-api: {context: 128000, paid: true, quota: none}
+  gpt-main-api: {context: 128000, paid: true, quota: none}
+  gpt-max-api:  {context: 128000, paid: true, quota: none}
+
   test-flaky: {context: 32000, quota: none}

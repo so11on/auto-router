@@ -57,7 +57,7 @@ rate limited. OpenRouter free models can disappear without notice (`nemotron-3-s
 Verify current numbers in each provider's console.
 
 ## Not connected
-- **Cloudflare Workers AI**: account id and token saved, but every call to `/accounts/<id>/ai/...` returned 401 "Authentication error" and `/accounts/<id>` returned 9109 "Unauthorized". The token verifies as a user token. Fix in the dashboard: token must list this account under *Account Resources* and have *Workers AI* permission (template "Workers AI"), and the id must be the account id from the dashboard URL. Not tested beyond that.
+- **Cloudflare Workers AI** — **working since 2026-10-24** (see below). Earlier problem: account id and token saved, but every call to `/accounts/<id>/ai/...` returned 401 "Authentication error" and `/accounts/<id>` returned 9109 "Unauthorized". The token verifies as a user token. Fix in the dashboard: token must list this account under *Account Resources* and have *Workers AI* permission (template "Workers AI"), and the id must be the account id from the dashboard URL. Not tested beyond that.
 - **OmniRoute keyless providers** (Pollinations, OpenCode Zen, Kilo): all required a real key at test time and were removed.
 - **Anthropic API**: key valid, balance zero ("credit balance is too low"); not free in any case.
 
@@ -161,3 +161,8 @@ Add one with the steps in [OPERATIONS.md](OPERATIONS.md), test each model with a
 Active members today: `free-fast` = Groq gpt-oss-20b, Groq qwen3.8-27b, LLM7 DeepSeek-V4-Flash, Ollama gemma4:31b, Ollama nemotron-3-super,
 OpenRouter minimax-m3.1-flash:free. `free-coding` = Groq gpt-oss-120b, Mistral codestral, LLM7 DeepSeek-V4-Flash, NVIDIA nemotron-3-ultra,
 Ollama nemotron-3-super, OpenRouter nemotron-3-ultra / north-mini-code / laguna-s-2.1 (:free), Groq qwen3.8-27b, Ollama gemma4:31b.
+
+## Cloudflare Workers AI (verified 2026-10-24)
+After replacing the credentials with a Workers-AI-scoped token (see docs/GET-KEYS.md), `node ar.mjs omniroute` discovered and verified these models with real requests; they are in both pool combos:
+`@cf/meta/llama-3.3-70b-instruct-fp8-fast`, `@cf/zai-org/glm-4.7-flash`, `@cf/google/gemma-4-26b-a4b-it`, `@cf/qwen/qwen2.5-coder-32b-instruct`.
+Published free allowance: about 10,000 "neurons" per day shared by all models (from OmniRoute's documentation, not measured by us). Going over fails the request rather than billing.

@@ -9,6 +9,7 @@ services:
       - REQUIRE_API_KEY=true
       - INITIAL_PASSWORD=${OMNIROUTE_PASSWORD}
       - OMNIROUTE_MEMORY_MB=1024
+      - CLOUDFLARE_ACCOUNT_ID=${CLOUDFLARE_ACCOUNT_ID:-}   # read by OmniRoute's Cloudflare Workers AI provider
     volumes:
       - omniroute-data:/app/data
   litellm:

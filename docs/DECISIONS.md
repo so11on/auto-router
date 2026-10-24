@@ -71,9 +71,18 @@ footers are stripped from model history to avoid imitation. Provider name taken 
 Opus 5.5 returned HTTP 400 "Claude Code 2.1.72 does not support this model; version 2.1.280 or newer is required" through the bridge. `claude update`
 (→ 2.1.304) fixed it; haiku, sonnet and opus then answered. The bridge must be restarted after an update.
 
+## 2026-10-24 — OpenAI: same two-route pattern as Claude
+ChatGPT Plus/Pro has no API access, so a plan can only be used through OpenAI's own terminal tool (Codex CLI, `codex exec --json`). `gpt-*-cli` goes through the bridge, `gpt-*-api` through the OpenAI API;
+`OPENAI_PRIMARY` picks the first, each is the other's fallback. Model ids are never hard-coded: `node ar.mjs openai` writes them after a verifying request. The Codex route has no session resume (fresh session per turn with a replayed transcript).
+Profiles E and F use OpenAI instead of Claude.
+
+## 2026-10-24 — Cloudflare finally working; ids verified, token minted
+Both ids pasted from Cloudflare's dashboard assistant were not the problem: the Account ID was right, the **token** only had "API Tokens Write" (a create-tokens token), hence "Authentication error" everywhere.
+With the owner's consent the token was used once to create `auto-router-workers-ai` (Workers AI Read+Write on that account). `node ar.mjs cloudflare-token` now automates that repair; `node ar.mjs keys --check` diagnoses it.
+
 ## Open items
 - Check Agent-mode edits on each `Auto:` model in the editor.
-- Add Cloudflare Workers AI (credentials rejected with 401; see FREE-TIER-LIMITS.md).
+- Verify the Codex route with a real `codex` install (event shapes, `-m`, `-c model_reasoning_effort`).
 - Extend mid-stream continuation to the Responses and Anthropic Messages streaming formats if the VS Code endpoint uses them.
 - Buy Anthropic API credits if the API route is wanted.
 - Consider Arch-Router as a local classifier to cut the ~1-2 s classification latency and the dependency on Google.
