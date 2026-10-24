@@ -1,0 +1,90 @@
+# Real models, all verified against the providers (see docs/FREE-TIER-LIMITS.md).
+# Pool entries have a 15 s timeout: an empty OmniRoute pool hangs for minutes, and the fallback must kick in fast.
+model_list:
+  # --- free pool (OmniRoute / FreeLLMAPI, OpenAI-compatible) ---
+  - model_name: free-pool
+    litellm_params:
+      model: openai/free-coding
+      api_base: os.environ/FREE_POOL_BASE
+      api_key: os.environ/FREE_POOL_KEY
+      timeout: 15
+      num_retries: 0
+  - model_name: free-pool-coding
+    litellm_params:
+      model: openai/free-coding
+      api_base: os.environ/FREE_POOL_BASE
+      api_key: os.environ/FREE_POOL_KEY
+      timeout: 15
+      num_retries: 0
+  - model_name: free-pool-fast
+    litellm_params:
+      model: openai/free-fast
+      api_base: os.environ/FREE_POOL_BASE
+      api_key: os.environ/FREE_POOL_KEY
+      timeout: 15
+      num_retries: 0
+
+  # --- single pool models, used by pins (!deepseek, !gpt-oss, !nemotron); each falls back to the free-coding combo ---
+  - {model_name: pool-deepseek,       litellm_params: {model: openai/llm7/DeepSeek-V4-Flash-0731, api_base: os.environ/FREE_POOL_BASE, api_key: os.environ/FREE_POOL_KEY, timeout: 30, num_retries: 0}}
+  - {model_name: pool-gpt-oss-120b,   litellm_params: {model: openai/groq/openai/gpt-oss-120b, api_base: os.environ/FREE_POOL_BASE, api_key: os.environ/FREE_POOL_KEY, timeout: 30, num_retries: 0}}
+  - {model_name: pool-nemotron-ultra, litellm_params: {model: openai/nvidia/nvidia/nemotron-3-ultra-550b-a55b, api_base: os.environ/FREE_POOL_BASE, api_key: os.environ/FREE_POOL_KEY, timeout: 30, num_retries: 0}}
+
+  # --- Gemini ---
+  - model_name: gemini-flash-lite
+    litellm_params: {model: gemini/gemini-3.5-flash-lite, api_key: os.environ/GEMINI_API_KEY}
+  - model_name: gemini-flash
+    litellm_params: {model: gemini/gemini-3.8-flash, api_key: os.environ/GEMINI_API_KEY}
+  - model_name: gemini-pro
+    litellm_params: {model: gemini/gemini-3.1-pro-preview, api_key: os.environ/GEMINI_API_KEY}
+
+  # --- Gemini FREE tier (project WITHOUT billing): slow (~20 s) but stable; only the flash-lite model is kept ---
+  - model_name: gemini-free-flash-lite
+    litellm_params: {model: gemini/gemini-3.5-flash-lite, api_key: os.environ/GEMINI_FREE_API_KEY}
+
+  # --- Claude: "cli" = Claude Code via claude-bridge (your subscription), "api" = Anthropic API key ---
+  # The hook picks the suffix from CLAUDE_PRIMARY (cli|api); fallbacks below cover the other route.
+  - {model_name: claude-haiku-cli,  litellm_params: {model: openai/claude-code-haiku,  api_base: http://host.docker.internal:4100/v1, api_key: os.environ/BRIDGE_KEY}}
+  - {model_name: claude-sonnet-cli, litellm_params: {model: openai/claude-code-sonnet, api_base: http://host.docker.internal:4100/v1, api_key: os.environ/BRIDGE_KEY}}
+  - {model_name: claude-opus-cli,   litellm_params: {model: openai/claude-code-opus,   api_base: http://host.docker.internal:4100/v1, api_key: os.environ/BRIDGE_KEY}}
+  - {model_name: claude-haiku-api,  litellm_params: {model: anthropic/claude-haiku-5-5,  api_key: os.environ/ANTHROPIC_API_KEY}}
+  - {model_name: claude-sonnet-api, litellm_params: {model: anthropic/claude-sonnet-5-5, api_key: os.environ/ANTHROPIC_API_KEY}}
+  - {model_name: claude-opus-api,   litellm_params: {model: anthropic/claude-opus-5-5,   api_key: os.environ/ANTHROPIC_API_KEY}}
+
+  # --- test fixture for the mid-stream failover test (scripts/flaky_server.py) ---
+  - {model_name: test-flaky, litellm_params: {model: openai/flaky, api_base: 'http://host.docker.internal:4199/v1', api_key: x}}
+
+  # --- virtual models shown in the VS Code picker; the hook rewrites them ---
+  - model_name: auto-free
+    litellm_params: {model: openai/free-fast, api_base: os.environ/FREE_POOL_BASE, api_key: os.environ/FREE_POOL_KEY, timeout: 15, num_retries: 0}
+  - model_name: auto-balanced
+    litellm_params: {model: gemini/gemini-3.8-flash, api_key: os.environ/GEMINI_API_KEY}
+  - model_name: auto-smart
+    litellm_params: {model: openai/claude-code-sonnet, api_base: http://host.docker.internal:4100/v1, api_key: os.environ/BRIDGE_KEY}
+
+router_settings:
+  num_retries: 0
+  allowed_fails: 1
+  cooldown_time: 300
+  fallbacks:
+    - {free-pool: [gemini-free-flash-lite]}
+    - {free-pool-coding: [gemini-free-flash-lite]}
+    - {free-pool-fast: [gemini-free-flash-lite]}
+    - {test-flaky: [gemini-flash-lite]}
+    - {pool-deepseek: [free-pool-coding]}
+    - {pool-gpt-oss-120b: [free-pool-coding]}
+    - {pool-nemotron-ultra: [free-pool-coding]}
+    - {gemini-flash: [claude-haiku-cli, claude-haiku-api]}
+    - {gemini-pro: [claude-sonnet-cli, claude-sonnet-api]}
+    - {claude-haiku-cli: [claude-haiku-api, gemini-flash-lite]}
+    - {claude-haiku-api: [claude-haiku-cli, gemini-flash-lite]}
+    - {claude-sonnet-cli: [claude-sonnet-api, gemini-pro]}
+    - {claude-sonnet-api: [claude-sonnet-cli, gemini-pro]}
+    - {claude-opus-cli: [claude-opus-api, claude-sonnet-cli, gemini-pro]}
+    - {claude-opus-api: [claude-opus-cli, claude-sonnet-api, gemini-pro]}
+
+litellm_settings:
+  drop_params: true
+  callbacks: router_hook.proxy_handler_instance
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

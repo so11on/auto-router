@@ -1,0 +1,11 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "node <PATH-TO-auto-router>/scripts/hook-session-start.mjs",
+        "timeout": 10
+      }
+    ]
+  }
+}

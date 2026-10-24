@@ -1,0 +1,28 @@
+{
+  "name": "auto-router-companion",
+  "displayName": "auto-router companion",
+  "description": "Status bar for auto-router (model, context %, quota) and automatic continuation in a new chat when the context is nearly full.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "license": "MIT",
+  
+  "engines": {"vscode": "^1.100.0"},
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {"command": "autoRouter.showStatus", "title": "auto-router: Show status"},
+      {"command": "autoRouter.openMemory", "title": "auto-router: Open session memory"},
+      {"command": "autoRouter.continueInNewChat", "title": "auto-router: Continue in a new chat now"}
+    ],
+    "configuration": {
+      "title": "auto-router",
+      "properties": {
+        "autoRouter.stateFile": {"type": "string", "default": "", "description": "Path to auto-router's data/context-state.json. Empty = read it from ~/.auto-router/config.json (written by `node ar.mjs init`)."},
+        "autoRouter.autoNewChat": {"type": "boolean", "default": true, "description": "Open a new chat automatically when the gateway asks for it (context nearly full)."},
+        "autoRouter.autoSend": {"type": "boolean", "default": true, "description": "Send the continuation prompt automatically (otherwise it is only typed into the chat box)."}
+      }
+    }
+  }
+}

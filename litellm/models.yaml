@@ -1,0 +1,41 @@
+# Model registry: one entry per LiteLLM model_name (config.yaml). Used for context control and quota prediction.
+# context: input window in tokens. For OmniRoute combos it is the SMALLEST window among the combo members, because any
+#          member may answer (OmniRoute's /v1/models reports the largest, which is misleading).
+# paid:    true if a call can cost money (false for free tiers and for the Claude subscription via the CLI bridge).
+# quota:   which quota tracker applies (see quota.py):
+#            claude-subscription  -> utilization reported by Claude Code (`rate_limit_event.unifiedWindows`)
+#            counted              -> our own counters against `limits` below
+#            none                 -> billed per token, no hard quota we can see
+# limits:  only numbers we measured or that the provider publishes; "source" says which. Missing = unknown.
+# Verified 2026-10-24: Gemini and Claude windows from LiteLLM model info and Claude Code `modelUsage.contextWindow`;
+# pool windows from OmniRoute /v1/models per member model.
+
+defaults:
+  context: 128000
+  paid: false
+  quota: counted
+
+models:
+  # --- free pool (OmniRoute) ---
+  free-pool-fast:      {context: 128000, quota: counted, limits: {rpm: 30, source: "Groq listed 30 rpm for gpt-oss-20b (first member)"}}
+  free-pool-coding:    {context: 128000, quota: counted, limits: {rpm: 30, source: "Groq listed 30 rpm for gpt-oss-120b (first member)"}}
+  free-pool:           {context: 128000, quota: counted}
+  pool-deepseek:       {context: 64000,  quota: counted, limits: {tpd: 100000, rpm: 60, source: "LLM7 listed: 100K tokens/day, 60 rpm; context unknown, conservative"}}
+  pool-gpt-oss-120b:   {context: 128000, quota: counted, limits: {rpm: 30, rpd: 1000, source: "Groq listed"}}
+  pool-nemotron-ultra: {context: 128000, quota: counted, limits: {rpm: 40, rpd: 10000, source: "NVIDIA NIM listed"}}
+
+  # --- Gemini ---
+  gemini-free-flash-lite: {context: 1048576, quota: counted, limits: {rpm: 15, source: "measured 2026-10-20 (429 body)"}}
+  gemini-flash-lite:      {context: 1048576, paid: true, quota: none}
+  gemini-flash:           {context: 1048576, paid: true, quota: none}
+  gemini-pro:             {context: 1048576, paid: true, quota: none}
+
+  # --- Claude: CLI bridge (subscription) and API ---
+  claude-haiku-cli:  {context: 1000000, quota: claude-subscription}
+  claude-sonnet-cli: {context: 1000000, quota: claude-subscription}
+  claude-opus-cli:   {context: 1000000, quota: claude-subscription}
+  claude-haiku-api:  {context: 1000000, paid: true, quota: none}
+  claude-sonnet-api: {context: 1000000, paid: true, quota: none}
+  claude-opus-api:   {context: 1000000, paid: true, quota: none}
+
+  test-flaky: {context: 32000, quota: none}

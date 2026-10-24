@@ -1,0 +1,23 @@
+{
+  "_comment": "Models the installer tries to put in the OmniRoute combos, in priority order. Each is probed with a real request before it is kept. Verified on 2026-10-24; free tiers rotate, so the probe decides. Format: <omniroute provider>/<model id as the provider names it>.",
+  "free-fast": [
+    "groq/openai/gpt-oss-20b",
+    "groq/qwen/qwen3.8-27b",
+    "llm7/DeepSeek-V4-Flash-0731",
+    "ollama-cloud/gemma4:31b",
+    "ollama-cloud/nemotron-3-super",
+    "openrouter/minimax/minimax-m3.1-flash:free"
+  ],
+  "free-coding": [
+    "groq/openai/gpt-oss-120b",
+    "mistral/codestral-latest",
+    "llm7/DeepSeek-V4-Flash-0731",
+    "nvidia/nvidia/nemotron-3-ultra-550b-a55b",
+    "ollama-cloud/nemotron-3-super",
+    "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+    "openrouter/cohere/north-mini-code:free",
+    "openrouter/poolside/laguna-s-2.1:free",
+    "groq/qwen/qwen3.8-27b",
+    "ollama-cloud/gemma4:31b"
+  ]
+}

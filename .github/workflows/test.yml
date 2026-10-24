@@ -1,0 +1,21 @@
+name: tests
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install pyyaml
+      - name: Node tests (installer, VS Code patching, personal-data scan)
+        run: node --test tests/ar.test.mjs
+      - name: Python tests (routing hook, policy, quota, context)
+        run: python -m unittest discover -s tests
+      - name: Syntax checks
+        run: |
+          node --check ar.mjs
+          node --check claude-bridge/server.mjs
+          node --check vscode-extension/extension.js

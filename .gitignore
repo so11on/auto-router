@@ -1,0 +1,13 @@
+# secrets and local state — never commit
+.env
+.env.*
+!.env.example
+*.bak
+*.bak-*
+data/
+.auto-router/
+# tooling
+node_modules/
+__pycache__/
+*.pyc
+.DS_Store

@@ -1,0 +1,33 @@
+services:
+  omniroute:
+    image: diegosouzapw/omniroute:latest
+    restart: unless-stopped
+    stop_grace_period: 40s
+    ports:
+      - "127.0.0.1:20128:20128"
+    environment:
+      - REQUIRE_API_KEY=true
+      - INITIAL_PASSWORD=${OMNIROUTE_PASSWORD}
+      - OMNIROUTE_MEMORY_MB=1024
+    volumes:
+      - omniroute-data:/app/data
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    command: ["--config", "/app/ar/config.yaml", "--port", "4000"]
+    ports:
+      - "127.0.0.1:4000:4000"
+    env_file: .env
+    depends_on:
+      - omniroute
+    environment:
+      - PYTHONPATH=/app/ar
+      - ROUTING_FILE=/app/ar/routing.yaml
+      - BRIDGE_URL=http://host.docker.internal:4100
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./litellm:/app/ar:ro          # config.yaml, routing.yaml, models.yaml and the hook modules
+      - ./data:/app/data
+
+volumes:
+  omniroute-data:
