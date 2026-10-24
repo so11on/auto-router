@@ -6,7 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseEnv, setEnvText, patchProviders, buildProvider, vscodeUserDir, openaiBlocks, applyBlocks, buildRoutingText, familiesFrom, copilotBlocks, LADDER } from "../ar.mjs";
+import { parseEnv, setEnvText, patchProviders, buildProvider, vscodeUserDir, openaiBlocks, applyBlocks, buildRoutingText, familiesFrom, copilotBlocks, LADDER, planSync, applySync, mergeEnv, mergeRouting, mergeConfig, changelogSince } from "../ar.mjs";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -106,6 +106,77 @@ test("copilot blocks and fresh install with --profile auto", () => {
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
+function oldInstall() {
+  // an install made with the very first public version: no VERSION, no Copilot/OpenAI pins, no managed blocks, fewer .env settings
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ar-old-"));
+  const dir = path.join(tmp, "install");
+  fs.cpSync(ROOT, dir, { recursive: true, filter: (s) => !/[\\/](\.git|data|node_modules|\.auto-router)([\\/]|$)/.test(s) && !/[\\/]\.env(\.bak)?$/.test(s) });
+  fs.rmSync(path.join(dir, "VERSION")); fs.rmSync(path.join(dir, "CHANGELOG.md")); fs.rmSync(path.join(dir, "docs", "GET-KEYS.md"));
+  const rp = path.join(dir, "litellm", "routing.yaml");
+  fs.writeFileSync(rp, fs.readFileSync(rp, "utf8").replace(/  (gpt|gpt-max|gpt-mini|copilot|copilot-max|copilot-mini):.*\n/g, "").replace(/\n# Mid-task model switching[\s\S]*?(?=\n# Context control)/, "").replace("max_complexity: 3, model: gemini-flash}", "max_complexity: 3, model: gemini-flash-lite}") // user tuning
+  );
+  const cp = path.join(dir, "litellm", "config.yaml");
+  fs.writeFileSync(cp, fs.readFileSync(cp, "utf8").replace(/ *# >>> (openai|copilot)[^\n]*\n[\s\S]*?# <<< (openai|copilot)[^\n]*\n/g, ""));
+  fs.writeFileSync(path.join(dir, ".env"), "LITELLM_MASTER_KEY=sk-mine\nGROQ_API_KEY=gsk_mine\nCLAUDE_PRIMARY=api\nBRIDGE_KEY=b\nBRIDGE_ALLOWED_ROOTS=/x\nFREE_POOL_ENABLED=true\n");
+  fs.mkdirSync(path.join(dir, "data")); fs.writeFileSync(path.join(dir, "data", "usage.jsonl"), "{}\n");
+  return { tmp, dir };
+}
+
+test("update: an old install gets the new features and keeps every user choice", () => {
+  const { tmp, dir } = oldInstall();
+  const before = fs.readFileSync(path.join(dir, "litellm", "routing.yaml"), "utf8");
+  assert.ok(!before.includes("copilot-max") && !before.includes("switching:"));
+  // make the config carry a user-managed OpenAI block, as `ar.mjs openai` would have written it
+  const cp = path.join(dir, "litellm", "config.yaml");
+  fs.writeFileSync(cp, fs.readFileSync(cp, "utf8").replace("  # --- virtual models shown", "  # >>> openai (managed by ar.mjs)\n  - {model_name: gpt-main-api, litellm_params: {model: openai/mine, api_key: os.environ/OPENAI_API_KEY}}\n  # <<< openai\n\n  # --- virtual models shown"));
+  const plan = planSync(ROOT, dir);
+  assert.ok(plan.add.includes("VERSION") && plan.add.includes("docs/GET-KEYS.md") && plan.add.includes("CHANGELOG.md"));
+  assert.ok(plan.merged.includes("litellm/routing.yaml") && plan.merged.includes("litellm/config.yaml"));
+  assert.ok(plan.env.added.includes("OPENAI_API_KEY") && plan.env.added.includes("COPILOT_MODEL_MAIN"));
+  assert.ok(!plan.change.concat(plan.add).includes(".env") && !plan.change.concat(plan.add).some((f) => f.startsWith("data/")));
+  const backup = path.join(dir, "data", "bk");
+  applySync(plan, ROOT, dir, backup);
+  // user data untouched
+  const env = parseEnv(fs.readFileSync(path.join(dir, ".env"), "utf8"));
+  assert.equal(env.LITELLM_MASTER_KEY, "sk-mine"); assert.equal(env.GROQ_API_KEY, "gsk_mine");
+  assert.equal(env.CLAUDE_PRIMARY, "api"); assert.equal(env.BRIDGE_ALLOWED_ROOTS, "/x");
+  assert.equal(env.OPENAI_PRIMARY, "cli"); assert.equal(env.AUTO_ROUTER_FOOTER, "true", "new settings take the example's default, not an empty value");
+  assert.ok("COPILOT_MODEL_MAIN" in env && "OPENAI_API_KEY" in env);
+  assert.equal(fs.readFileSync(path.join(dir, "data", "usage.jsonl"), "utf8"), "{}\n");
+  // routing: user tuning kept, new pins and sections added
+  const r = fs.readFileSync(path.join(dir, "litellm", "routing.yaml"), "utf8");
+  assert.match(r, /max_complexity: 3, model: gemini-flash-lite\}/, "the user's tier edit survives");
+  for (const pin of ["gpt", "gpt-max", "copilot", "copilot-max", "copilot-mini"]) assert.match(r, new RegExp(`^  ${pin}:`, "m"));
+  assert.match(r, /^switching:/m); assert.match(r, /^context:/m);
+  assert.equal((r.match(/^pins:/gm) || []).length, 1);
+  // config: new markers present, the user's managed OpenAI block carried over
+  const c = fs.readFileSync(cp, "utf8");
+  assert.ok(c.includes(">>> copilot (managed by ar.mjs)") && c.includes(">>> copilot-fallbacks"));
+  assert.ok(c.includes("openai/mine"), "managed block content is preserved");
+  // code was replaced and the old copies backed up
+  assert.equal(fs.readFileSync(path.join(dir, "ar.mjs"), "utf8"), fs.readFileSync(path.join(ROOT, "ar.mjs"), "utf8"));
+  assert.ok(fs.existsSync(path.join(backup, "litellm", "routing.yaml")) && fs.existsSync(path.join(backup, ".env")));
+  // idempotent
+  const again = planSync(ROOT, dir);
+  assert.deepEqual([again.add, again.change, again.env.added], [[], [], []]);
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test("update helpers: env defaults, routing pin merge, changelog filter, nothing secret copied", () => {
+  const ex = "# comment for X\nX=default\nSECRET=\n";
+  const m = mergeEnv("A=1\n", ex);
+  assert.match(m.text, /# comment for X\nX=default\nSECRET=\n$/);
+  assert.equal(mergeEnv(m.text, ex).text, m.text, "no duplicates on a second run");
+  const merged = mergeRouting("modes:\n  free:\n    - {max_complexity: 5, model: a}\n\npins:\n  opus:     {model: claude-opus}\n", "pins:\n  opus:     {model: claude-opus}\n  gpt:      {model: gpt-main}\n");
+  assert.match(merged, /opus:.*\n  gpt: /);
+  const log = "# Changelog\n\n## 0.3.0 — d\n- c\n\n## 0.2.0 — d\n- b\n\n## 0.1.0 — d\n- a\n";
+  assert.match(changelogSince(log, "0.2.0"), /0\.3\.0/);
+  assert.ok(!changelogSince(log, "0.2.0").includes("0.2.0"));
+  assert.match(changelogSince(log, "0.0.0 (before versioning)"), /0\.1\.0/);
+  assert.equal(changelogSince(log, "0.3.0"), "");
+  assert.equal(mergeConfig("x", "y"), "y");
+});
+
 test("profiles A-F exist, are valid, and every model they name is defined or a known family", () => {
   for (const p of "ABCDEF") {
     const t = fs.readFileSync(path.join(ROOT, "profiles", `routing.${p}.yaml`), "utf8");
@@ -162,7 +233,7 @@ test("no personal data or secrets are shipped", () => {
   });
   const hits = [];
   for (const f of walk(ROOT)) {
-    const t = fs.readFileSync(f, "utf8").replaceAll("github.com/so11on/auto-router", ""); // the public repository URL is intentional
+    const t = fs.readFileSync(f, "utf8").replaceAll("github.com/so11on/auto-router", "").replaceAll("so11on/auto-router", ""); // the public repository URL is intentional
     for (const re of bad) if (re.test(t)) hits.push(`${path.relative(ROOT, f)} ~ ${re}`);
   }
   assert.deepEqual(hits, []);

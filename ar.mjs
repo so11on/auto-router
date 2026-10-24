@@ -5,6 +5,7 @@
 //   node ar.mjs init [options]          create .env (generated secrets), pick a routing profile, remember paths
 //   node ar.mjs keys [--check]          which keys are set (names only); --check also asks each provider whether the key works
 //   node ar.mjs cloudflare-token       mint a Workers-AI-only token from a token that can only create tokens (see docs/GET-KEYS.md)
+//   node ar.mjs update [--apply]       update THIS install from the repository (dry run first); keeps your keys and choices
 //   node ar.mjs detect [--json]        which paid plans / logins this computer has (Claude, ChatGPT, GitHub Copilot, keys)
 //   node ar.mjs copilot [options]       configure your paid GitHub Copilot plan as router targets (Copilot CLI)
 //   node ar.mjs openai [options]        configure OpenAI: Codex CLI with your ChatGPT login and/or an OpenAI API key
@@ -301,6 +302,146 @@ export function buildRoutingText(families, pool, base) {
     `modes:\n  free:\n${tiersYaml(freeTiers)}\n  balanced:\n${tiersYaml(balanced)}\n  smart:\n${tiersYaml(smart)}\n\n` + tail;
 }
 
+// ---------------------------------------------------------------- update
+const REPO_DEFAULT = "so11on/auto-router";
+// never overwritten, never deleted: secrets, runtime data, backups, VCS
+const NEVER_TOUCH = [/^\.git\//, /^\.env$/, /^data\//, /^\.auto-router\//, /^node_modules\//, /\.bak/, /^\.DS_Store$/];
+const MERGED = new Set(["litellm/routing.yaml", "litellm/config.yaml"]);
+const posix = (p) => p.split(path.sep).join("/");
+export function listFiles(dir, base = dir, out = []) {
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, e.name), rel = posix(path.relative(base, full));
+    if (NEVER_TOUCH.some((re) => re.test(rel + (e.isDirectory() ? "/" : "")))) continue;
+    if (e.isDirectory()) listFiles(full, base, out); else out.push(rel);
+  }
+  return out.sort();
+}
+const blockOf = (text, begin, end) => { const a = text.indexOf(begin), b = text.indexOf(end); return a >= 0 && b > a ? text.slice(a + begin.length + 1, b).replace(/\n$/, "") : null; };
+/** New upstream config.yaml, with the locally managed blocks (openai / copilot models and fallbacks) carried over. */
+export function mergeConfig(local, upstream) {
+  let out = upstream;
+  for (const [b, e] of [[OPENAI_BEGIN, OPENAI_END], [FB_BEGIN, FB_END], [CP_BEGIN, CP_END], [CPF_BEGIN, CPF_END]]) {
+    const body = blockOf(local, b, e);
+    if (body && body.trim() && out.includes(b)) out = applyBlocks(out, b, e, body);
+  }
+  return out;
+}
+/** Keep the user's tuned routing.yaml; add what the new version introduced (new pins, new switching/context sections). */
+export function mergeRouting(local, upstream) {
+  let out = local;
+  const pinNames = (t) => { const m = t.match(/(?:^|\n)pins:\n((?:  .*\n?)+)/); return m ? [...m[1].matchAll(/^  ([\w-]+):\s*\{.*\}.*$/gm)].map((x) => [x[1], x[0]]) : []; };
+  const have = new Set(pinNames(out).map(([n]) => n));
+  const missing = pinNames(upstream).filter(([n]) => !have.has(n));
+  if (missing.length) {
+    if (/(?:^|\n)pins:\n/.test(out)) out = out.replace(/((?:^|\n)pins:\n(?:  .*\n?)+)/, (m) => m.replace(/\n?$/, "\n") + missing.map(([, l]) => l).join("\n") + "\n");
+    else out = out.replace(/\s*$/, "\n") + "\npins:\n" + missing.map(([, l]) => l).join("\n") + "\n";
+  }
+  for (const key of ["switching", "context"]) {
+    if (new RegExp(`^${key}:`, "m").test(out)) continue;
+    const m = upstream.match(new RegExp(`((?:^#.*\\n)*)^${key}:\\n(?:  .*\\n?)+`, "m"));
+    if (m) out = out.replace(/\s*$/, "\n\n") + m[0].replace(/\n?$/, "\n");
+  }
+  return out;
+}
+/** Append variables introduced by the new .env.example with the example's default value and their comments. Never touches existing values. */
+export function mergeEnv(localText, exampleText) {
+  const have = new Set(Object.keys(parseEnv(localText)));
+  const lines = exampleText.split(/\r?\n/), add = [], keys = [];
+  lines.forEach((l, i) => {
+    const m = l.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/);
+    if (!m || have.has(m[1])) return;
+    let j = i - 1; const com = [];
+    while (j >= 0 && /^\s*#/.test(lines[j])) com.unshift(lines[j--]);
+    add.push(...com, `${m[1]}=${l.slice(l.indexOf("=") + 1).trim()}`); // the example's own default: empty for secrets, a sane value for settings
+    keys.push(m[1]);
+  });
+  return { text: keys.length ? localText.replace(/\s*$/, "\n") + "\n" + add.join("\n") + "\n" : localText, added: keys };
+}
+const semver = (v) => String(v || "0.0.0").trim().split(".").map((n) => parseInt(n, 10) || 0);
+const newer = (a, b) => { const x = semver(a), y = semver(b); for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] > y[i]; return false; };
+export function changelogSince(text, version) {
+  return text.split(/^## /m).slice(1).filter((blk) => newer(blk.match(/^(\d+\.\d+\.\d+)/)?.[1], version)).map((b) => "## " + b.trim()).join("\n\n");
+}
+/** Compare an unpacked upstream tree with this install. Pure file work, no network. */
+export function planSync(upDir, localDir) {
+  const plan = { add: [], change: [], same: 0, localOnly: [], merged: [], env: { added: [] }, texts: {} };
+  const up = listFiles(upDir);
+  for (const rel of up) {
+    const src = path.join(upDir, rel), dst = path.join(localDir, rel);
+    if (MERGED.has(rel)) {
+      const upText = fs.readFileSync(src, "utf8"), locText = fs.existsSync(dst) ? fs.readFileSync(dst, "utf8") : null;
+      const merged = locText === null ? upText : rel.endsWith("routing.yaml") ? mergeRouting(locText, upText) : mergeConfig(locText, upText);
+      plan.texts[rel] = merged;
+      if (locText === null) plan.add.push(rel); else if (merged !== locText) { plan.change.push(rel); plan.merged.push(rel); } else plan.same++;
+    } else if (!fs.existsSync(dst)) plan.add.push(rel);
+    else if (fs.readFileSync(src).equals(fs.readFileSync(dst))) plan.same++;
+    else plan.change.push(rel);
+  }
+  const upSet = new Set(up);
+  plan.localOnly = listFiles(localDir).filter((r) => !upSet.has(r));
+  const envPath = path.join(localDir, ".env"), exPath = path.join(upDir, ".env.example");
+  if (fs.existsSync(envPath) && fs.existsSync(exPath)) {
+    const m = mergeEnv(fs.readFileSync(envPath, "utf8"), fs.readFileSync(exPath, "utf8"));
+    plan.env = m; plan.texts[".env"] = m.text;
+  }
+  return plan;
+}
+export function applySync(plan, upDir, localDir, backupDir) {
+  const save = (rel) => { const f = path.join(localDir, rel); if (fs.existsSync(f)) { const b = path.join(backupDir, rel); fs.mkdirSync(path.dirname(b), { recursive: true }); fs.copyFileSync(f, b); } };
+  for (const rel of [...plan.add, ...plan.change]) {
+    save(rel);
+    const dst = path.join(localDir, rel); fs.mkdirSync(path.dirname(dst), { recursive: true });
+    if (rel in plan.texts) fs.writeFileSync(dst, plan.texts[rel]); else fs.copyFileSync(path.join(upDir, rel), dst);
+  }
+  if (plan.env.added.length) { save(".env"); fs.writeFileSync(path.join(localDir, ".env"), plan.texts[".env"], { mode: 0o600 }); }
+}
+async function fetchUpstream(repo, ref) {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ar-update-"));
+  const tgz = path.join(tmp, "src.tar.gz");
+  const res = await fetch(`https://codeload.github.com/${repo}/tar.gz/refs/heads/${ref}`, { redirect: "follow", signal: AbortSignal.timeout(60000) });
+  if (!res.ok) throw new Error(`download failed: HTTP ${res.status} for ${repo}@${ref}`);
+  fs.writeFileSync(tgz, Buffer.from(await res.arrayBuffer()));
+  const x = run("tar", ["-xzf", tgz, "-C", tmp]);
+  if (x.status !== 0) throw new Error(`could not unpack the download (is \`tar\` available?): ${(x.stderr || "").slice(0, 120)}`);
+  const dir = fs.readdirSync(tmp, { withFileTypes: true }).find((d) => d.isDirectory());
+  if (!dir) throw new Error("unexpected archive layout");
+  return path.join(tmp, dir.name);
+}
+async function update(flags) {
+  const repo = String(flags.repo || REPO_DEFAULT), ref = String(flags.ref || "main");
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return bad("--repo must look like owner/name");
+  let up;
+  try { up = flags.from ? path.resolve(String(flags.from)) : await fetchUpstream(repo, ref); } catch (err) { return bad(err.message); }
+  const readVer = (d) => { try { return fs.readFileSync(path.join(d, "VERSION"), "utf8").trim(); } catch { return null; } };
+  const localV = readVer(ROOT) || "0.0.0 (before versioning)", upV = readVer(up) || "unknown";
+  console.log(`Installed: ${localV}   Latest (${flags.from ? "local folder" : repo + "@" + ref}): ${upV}\n`);
+  const plan = planSync(up, ROOT);
+  const total = plan.add.length + plan.change.length + plan.env.added.length;
+  if (!total) { ok("already up to date — nothing to change"); return; }
+  const log = (title, list) => { if (list.length) { console.log(`${title} (${list.length}):`); list.forEach((f) => info(f)); } };
+  log("New files", plan.add);
+  log("Files that will be replaced", plan.change.filter((f) => !plan.merged.includes(f)));
+  log("Files merged with your settings (your choices are kept)", plan.merged);
+  if (plan.env.added.length) { console.log(`New settings added to .env with their default (${plan.env.added.length}):`); plan.env.added.forEach((k) => info(k)); }
+  if (plan.localOnly.length) info(`${plan.localOnly.length} file(s) exist only on this computer and are left alone.`);
+  console.log("\nNever touched: .env values, data/, litellm/routing.yaml tuning, keys, backups.");
+  try { const log2 = fs.readFileSync(path.join(up, "CHANGELOG.md"), "utf8"); const w = changelogSince(log2, readVer(ROOT) || "0.0.0"); if (w) console.log(`\nWhat's new since ${localV}:\n\n${w}\n`); } catch {}
+  if (!flags.apply) { warn("dry run — nothing was changed. To apply: node ar.mjs update --apply   (add --restart to restart the stack)"); return; }
+  const backup = path.join(DATA, `update-backup-${new Date().toISOString().replace(/[:.]/g, "-")}`);
+  applySync(plan, up, ROOT, backup);
+  ok(`updated to ${upV}. Replaced files were saved in ${path.relative(ROOT, backup)}`);
+  const changed = [...plan.add, ...plan.change];
+  const touches = (re) => changed.some((f) => re.test(f));
+  const todo = [];
+  if (touches(/^(litellm\/|docker-compose\.yml|claude-bridge\/)/)) todo.push("restart the stack:  node ar.mjs down && node ar.mjs up");
+  if (touches(/^vscode-extension\//)) todo.push("refresh VS Code (extension + models):  node ar.mjs vscode   then Developer: Reload Window");
+  todo.push("see what this computer can use now:  node ar.mjs detect   (new: paid GitHub Copilot → node ar.mjs copilot ; ChatGPT → node ar.mjs openai)");
+  todo.push("check:  node ar.mjs smoke");
+  if (flags.restart) { await down(); await up({}); todo.shift(); }
+  console.log("\nNext steps:"); todo.forEach((t) => info(t));
+  if (fs.existsSync(path.join(ROOT, ".git"))) info("This folder is a git clone: files were updated in place. Realign git with: git fetch && git reset --mixed origin/main");
+}
+
 // ---------------------------------------------------------------- detect
 function tryJson(cmd, args) { const r = run(cmd, args); try { return r.status === 0 ? JSON.parse(r.stdout) : null; } catch { return null; } }
 export function detectPlans() {
@@ -519,6 +660,11 @@ async function status() {
   (await portOpen(20128) ? ok : bad)("OmniRoute :20128 " + ((await portOpen(20128)) ? "up" : "down"));
   const b = await http(`${BRIDGE}/healthz`, { timeout: 2000 });
   (b.status === 200 ? ok : warn)(`claude-bridge :4100 ${b.status === 200 ? "up" : "down (only needed for the Claude CLI route)"}`);
+  try {
+    const mine = fs.readFileSync(path.join(ROOT, "VERSION"), "utf8").trim();
+    const r = await http(`https://raw.githubusercontent.com/${REPO_DEFAULT}/main/VERSION`, { timeout: 3000 });
+    if (r.status === 200 && newer(r.text.trim(), mine)) warn(`a newer version is available (${mine} → ${r.text.trim()}): node ar.mjs update`);
+  } catch {}
   try {
     const s = JSON.parse(fs.readFileSync(path.join(DATA, "context-state.json"), "utf8"));
     info(`last session: ${s.mode} → ${s.model}, context ${s.ctx_pct}%, quota ${s.quota?.state}`);
@@ -787,6 +933,7 @@ const HELP = `auto-router — node ar.mjs <command>
   init        --roots <folders> [--profile A-F|auto] [--families claude,openai,copilot,gemini] [--pool yes|no] [--claude cli|api|none] [--openai cli|api|none] [--force]
   keys        [--check] show which keys are set; --check tests each one against its provider
   cloudflare-token   fix "Authentication error" when CLOUDFLARE_API_TOKEN is a 'create tokens' token (docs/GET-KEYS.md)
+  update      [--apply] [--restart] [--repo owner/name] [--ref branch] [--from <folder>]   dry run by default; --apply changes files (backup kept)
   detect      [--json]  find out which paid plans/logins exist (never prints e-mails or keys)
   copilot     [--mini ID --main ID --max ID] [--check]   use your paid GitHub Copilot plan (Copilot CLI)
   openai      [--list] [--route cli|api|both] [--mini ID --main ID --max ID] [--check]   OpenAI via ChatGPT login (Codex CLI) and/or API key
@@ -810,6 +957,7 @@ async function main() {
     case "keys": return keys(flags);
     case "openai": return openai(flags);
     case "detect": return detect(flags);
+    case "update": return update(flags);
     case "copilot": return copilot(flags);
     case "cloudflare-token": return cloudflareToken();
     case "up": return up(flags);

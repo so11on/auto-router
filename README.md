@@ -35,6 +35,14 @@ Then in VS Code: **Developer: Reload Window** → open Copilot Chat → pick **A
 Requirements: [Docker](https://docs.docker.com/get-docker/), [Node.js ≥ 18](https://nodejs.org), VS Code ≥ 1.122 with GitHub Copilot Chat.
 Optional: the [Claude Code CLI](https://docs.claude.com/claude-code) (use your Claude subscription), the [Codex CLI](https://developers.openai.com/codex) (use your ChatGPT Plus/Pro plan), the [GitHub Copilot CLI](https://docs.github.com/copilot/concepts/agents/about-copilot-cli) (use a paid Copilot plan), Python 3.9+ (only for `tests/` and two dev tools).
 
+## Already installed? Update in one sentence
+Tell your AI assistant: *"Update my auto-router to the newest version following https://raw.githubusercontent.com/so11on/auto-router/main/UPDATE_WITH_AI.md"* — or run it yourself:
+```sh
+node ar.mjs update              # dry run: shows what would change and what is new
+node ar.mjs update --apply --restart
+```
+Your `.env`, keys, `data/` and routing tuning are kept; replaced files are backed up in `data/update-backup-*`. `node ar.mjs status` tells you when a newer version exists. See [CHANGELOG.md](CHANGELOG.md).
+
 ## What you get
 | Profile | Behaviour |
 |---|---|
@@ -63,7 +71,7 @@ Developed and verified on **macOS** (2026-10). The code is written to be portabl
 tested** — `node ar.mjs doctor` and `node ar.mjs smoke` tell you quickly if something is off; please report problems. Free-tier models rotate: `node ar.mjs omniroute` re-tests them.
 
 ## Documentation
-[INSTALL_WITH_AI.md](INSTALL_WITH_AI.md) (AI-driven install) · [docs/GET-KEYS.md](docs/GET-KEYS.md) (every key, step by step) · [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/ROUTING.md](docs/ROUTING.md) · [docs/CONFIGURATION.md](docs/CONFIGURATION.md) ·
+[INSTALL_WITH_AI.md](INSTALL_WITH_AI.md) (AI-driven install) · [UPDATE_WITH_AI.md](UPDATE_WITH_AI.md) (AI-driven update) · [CHANGELOG.md](CHANGELOG.md) · [docs/GET-KEYS.md](docs/GET-KEYS.md) (every key, step by step) · [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/ROUTING.md](docs/ROUTING.md) · [docs/CONFIGURATION.md](docs/CONFIGURATION.md) ·
 [docs/OPERATIONS.md](docs/OPERATIONS.md) · [docs/CLAUDE-BRIDGE.md](docs/CLAUDE-BRIDGE.md) · [docs/FREE-TIER-LIMITS.md](docs/FREE-TIER-LIMITS.md) · [docs/VSCODE-SETUP.md](docs/VSCODE-SETUP.md) ·
 [docs/SECURITY.md](docs/SECURITY.md) · [docs/TESTING.md](docs/TESTING.md) · [docs/DECISIONS.md](docs/DECISIONS.md) · [docs/INSTALL-LESSONS.md](docs/INSTALL-LESSONS.md) · [AGENTS.md](AGENTS.md)
 

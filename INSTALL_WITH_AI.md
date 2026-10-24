@@ -152,4 +152,4 @@ any failing upstream call. Then ask the user to send one easy and one hard quest
 | Windows: bridge does not start | Check `data/bridge.log`; make sure `claude` is on PATH (`where claude`). |
 | Anything else | `docs/INSTALL-LESSONS.md` lists every problem met so far with its fix. |
 
-To uninstall: `node ar.mjs vscode --uninstall && node ar.mjs down`, then delete the folder (and `~/.auto-router`).
+To update later: `UPDATE_WITH_AI.md` (or `node ar.mjs update`). To uninstall: `node ar.mjs vscode --uninstall && node ar.mjs down`, then delete the folder (and `~/.auto-router`).

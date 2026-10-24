@@ -7,6 +7,8 @@
 ## Start here
 - [AGENTS.md](AGENTS.md): map, commands, invariants, gotchas for AI assistants
 - [INSTALL_WITH_AI.md](INSTALL_WITH_AI.md): runbook for an AI assistant to install everything on a new computer (any OS)
+- [UPDATE_WITH_AI.md](UPDATE_WITH_AI.md): runbook for an AI assistant to update an existing install, keeping keys and choices
+- [CHANGELOG.md](CHANGELOG.md): what changed in each version
 - [docs/INSTALL-LESSONS.md](docs/INSTALL-LESSONS.md): every trap met during the first installation
 - [README.md](README.md): overview, status, quick start
 

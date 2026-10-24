@@ -82,6 +82,11 @@ all answer through the bridge. After any `claude update`, restart the bridge. If
 Every final answer ends with `*auto-router · auto-free → free-pool-fast · groq/gpt-oss-20b · explain c1 · 2.2s*` (mode → routed group · real
 provider/model · task, complexity, effort · time). Tool-call steps of an Agent run get no footer. Disable with `AUTO_ROUTER_FOOTER=false`.
 
+## Updating
+`node ar.mjs update` (dry run) → `node ar.mjs update --apply --restart`. It downloads the repository archive (`--repo owner/name`, `--ref branch`, or `--from <folder>` for an unpacked copy),
+compares file by file, replaces code and docs, **merges** `litellm/routing.yaml` (keeps your tiers; adds new pins and sections) and `litellm/config.yaml` (keeps the managed OpenAI/Copilot blocks),
+appends new `.env` settings with their defaults, and never touches `.env` values or `data/`. Replaced files go to `data/update-backup-<time>/`. Runbook for an AI: UPDATE_WITH_AI.md.
+
 ## Operation log
 ```sh
 node ar.mjs logs                       # last 30 events

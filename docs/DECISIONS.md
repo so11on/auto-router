@@ -85,6 +85,11 @@ Users chat in the Copilot Chat window, but the gateway runs outside VS Code and 
 Rejected: re-exporting `vscode.lm` over HTTP from the companion extension and community Copilot proxies (terms/abuse risk). Output is plain text (no documented JSON event schema), tokens are estimated, premium-request balance is invisible.
 With four vendor families the fixed profiles A-F stop scaling, so `init --profile auto --families …` generates the tables from a ladder per family (verified to reproduce profile A exactly), and `ar.mjs detect` reads local logins (`claude auth status`, `codex login status`, `gh api copilot_internal/user`) to pre-fill the installer's questions.
 
+## 2026-10-24 — `update` is file sync + merge, not `git pull`
+Users have different setups (clone, ZIP) and edited files that must survive (`.env`, `routing.yaml` tuning, managed blocks in `config.yaml`). `update` downloads the repository archive, syncs file by file,
+merges the three user-touched files with small text merges, backs up what it replaces, and is a dry run unless `--apply`. A clone is realigned with a printed `git fetch && git reset --mixed origin/main`.
+First-time bootstrap for copies that predate the command: fetch the new `ar.mjs` (UPDATE_WITH_AI.md Step 2). Trust model: whoever controls the repository can change the code that runs on the user's computer; hence the dry run, the file list, and `--repo/--ref/--from` to pin another source.
+
 ## Open items
 - Check Agent-mode edits on each `Auto:` model in the editor.
 - Verify the Copilot CLI route with a real paid plan (flags, model ids, how limits are worded).

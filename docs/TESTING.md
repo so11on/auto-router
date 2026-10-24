@@ -5,6 +5,7 @@
 | Unit (routing hook) | `python3 -m unittest discover -s tests -v` | none | free |
 | Installer helpers + simulated fresh install + personal-data scan | `node --test tests/ar.test.mjs` | none | free |
 | Bridge with stand-in `claude`/`codex` programs (answer, actions, usage, limits, broken stream) | `node --test tests/bridge.test.mjs` | none | free |
+| Update logic (old install → new version keeps keys/tuning, adds new pins/blocks/settings, idempotent) | `node --test tests/ar.test.mjs` | none | free |
 | Plan/login detection on this computer | `node ar.mjs detect` | none (reads local logins) | free |
 | Key verification against the real providers | `node ar.mjs keys --check` | yes | free (list endpoints) |
 | Smoke (3 modes end to end) | `node ar.mjs smoke` | yes | a few cents at most |
