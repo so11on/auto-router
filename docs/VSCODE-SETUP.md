@@ -64,3 +64,9 @@ answers or non-OmniRoute models only the model name may appear.
 
 ## Undo
 `cp "$HOME/Library/Application Support/Code/User/chatLanguageModels.json.bak-auto-router" "$HOME/Library/Application Support/Code/User/chatLanguageModels.json"`
+
+## Optional hardening (`node ar.mjs vscode --harden`)
+Merges into your `settings.json` (a backup `settings.json.bak-auto-router` is made first; run it again with `--uninstall` to remove only what it added):
+- `chat.tools.edits.autoApprove`: edits to `**/.env`, `**/.env.*`, `**/*.pem`, `**/*.key`, `**/.vscode/*.json` and `**/secrets/**` need your approval (`false`). Your own values for those patterns are never overridden.
+- `chat.agent.sandbox.enabled: true` (terminal sandbox; macOS, Linux, WSL2 only — skipped on Windows). The documentation also mentions `chat.tools.terminal.sandbox.enabled`; VS Code 1.142 does not contain that name (checked 2026-10-25), so it is not written.
+It never turns on global auto-approve, Autopilot or bypass. `chat.agent.networkFilter` can be managed only by an organisation and is not written. A `settings.json` with comments is not edited by the script (it would lose them): add the keys by hand.

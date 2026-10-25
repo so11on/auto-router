@@ -1057,7 +1057,56 @@ export function patchProviders(text, provider, remove = false) {
   if (!remove) arr.push(provider);
   return JSON.stringify(arr, null, 2) + "\n";
 }
+// SEC-12: optional VS Code hardening. Only these keys, never global auto-approve / Autopilot / Bypass.
+// `chat.agent.sandbox.enabled` is the name VS Code 1.142 ships (checked 2026-10-25 in its workbench bundle); `chat.tools.terminal.sandbox.enabled`
+// from the docs is not in that build, so it is not written. chat.agent.networkFilter may be managed by an organisation: documented, not written.
+export const HARDEN_AUTOAPPROVE = { "**/.env": false, "**/.env.*": false, "**/*.pem": false, "**/*.key": false, "**/.vscode/*.json": false, "**/secrets/**": false };
+/** Returns { text, added, kept }. `state.added` (from the previous run) is what `remove` takes out again; nothing else is touched. */
+export function patchHarden(text, state = {}, { remove = false, sandbox = true } = {}) {
+  let cfg = {};
+  if (text.trim()) {
+    try { cfg = JSON.parse(text); } catch { throw new Error("settings.json has comments or trailing commas; edit it by hand using docs/VSCODE-SETUP.md (a script would drop your comments)"); }
+    if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) throw new Error("settings.json is not a JSON object");
+  }
+  const prev = state.added || { autoApprove: [], sandbox: false };
+  const added = { autoApprove: [], sandbox: false }, kept = [];
+  const aa = { ...(cfg["chat.tools.edits.autoApprove"] || {}) };
+  if (remove) {
+    for (const k of prev.autoApprove || []) delete aa[k];
+    if (Object.keys(aa).length) cfg["chat.tools.edits.autoApprove"] = aa; else delete cfg["chat.tools.edits.autoApprove"];
+    if (prev.sandbox) delete cfg["chat.agent.sandbox.enabled"];
+    return { text: JSON.stringify(cfg, null, 2) + "\n", added: { autoApprove: [], sandbox: false }, kept };
+  }
+  for (const [k, v] of Object.entries(HARDEN_AUTOAPPROVE)) {
+    if (k in aa) { if (aa[k] !== v) kept.push(k); if ((prev.autoApprove || []).includes(k)) added.autoApprove.push(k); }
+    else { aa[k] = v; added.autoApprove.push(k); }
+  }
+  cfg["chat.tools.edits.autoApprove"] = aa;
+  if (sandbox) {
+    if ("chat.agent.sandbox.enabled" in cfg) { if (cfg["chat.agent.sandbox.enabled"] !== true) kept.push("chat.agent.sandbox.enabled"); added.sandbox = Boolean(prev.sandbox); }
+    else { cfg["chat.agent.sandbox.enabled"] = true; added.sandbox = true; }
+  }
+  return { text: JSON.stringify(cfg, null, 2) + "\n", added, kept };
+}
+function vscodeHarden(flags) {
+  const dir = flags.dir ? path.resolve(String(flags.dir)) : vscodeUserDir(flags.insiders ? "Code - Insiders" : "Code");
+  const file = path.join(dir, "settings.json"), stateFile = path.join(HOME_CFG_DIR, "harden-added.json");
+  const old = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
+  let state = {}; try { state = JSON.parse(fs.readFileSync(stateFile, "utf8")); } catch {}
+  const sandbox = process.platform !== "win32";
+  let r;
+  try { r = patchHarden(old, state, { remove: Boolean(flags.uninstall), sandbox }); } catch (err) { return bad(err.message); }
+  if (old) fs.writeFileSync(file + ".bak-auto-router", old, { mode: 0o600 });
+  fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(file, r.text);
+  fs.mkdirSync(HOME_CFG_DIR, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(stateFile, JSON.stringify({ added: r.added }), { mode: 0o600 });
+  ok(flags.uninstall ? `removed only what auto-router added from ${file}` : `hardened ${file} (backup: .bak-auto-router): edits to .env/keys/secrets/.vscode need your approval${sandbox ? ", terminal sandbox on" : ""}`);
+  if (r.kept.length) info(`kept your own values for: ${r.kept.join(", ")}`);
+  if (!sandbox && !flags.uninstall) info("terminal sandbox skipped: it does not exist on Windows (use WSL2)");
+  if (!flags.uninstall) info("Not touched: global auto-approve, Autopilot, bypass. chat.agent.networkFilter may be managed by your organisation (see docs/VSCODE-SETUP.md).");
+}
 function vscode(flags) {
+  if (flags.harden) return vscodeHarden(flags);
   const e = readEnv();
   if (!e?.LITELLM_MASTER_KEY) return bad("no .env / LITELLM_MASTER_KEY — run: node ar.mjs init");
   const dir = flags.dir ? path.resolve(String(flags.dir)) : vscodeUserDir(flags.insiders ? "Code - Insiders" : "Code");
@@ -1190,7 +1239,7 @@ const HELP = `auto-router — node ar.mjs <command>
   up | down | status
   omniroute   [--no-llm7] [--check]   connect free providers, verify models, build the combos; --check tests the OmniRoute contract
   omniroute-upgrade   [--to <tag> [--dry-run]] [--rollback]   list tags / test a new OmniRoute on a spare port and switch only if it passes
-  vscode      [--uninstall] [--insiders] [--dir <path>]
+  vscode      [--uninstall] [--insiders] [--dir <path>] [--harden]   --harden: optional safer VS Code settings (backs up settings.json)
   smoke       one request per profile
   logs        [-f] [--errors] [--tail N] [--type T] [--rid ID] [--since 30m] [--raw]
   usage       [--since 24h|7d|all] [--by model|mode|task]

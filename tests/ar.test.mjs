@@ -289,3 +289,25 @@ test("SEC-16: omniroute-upgrade to a tag that does not exist changes nothing", {
   assert.match(r.stdout + r.stderr, /could not pull/);
   assert.equal(fs.readFileSync(path.join(ROOT, "docker-compose.yml"), "utf8"), before);
 });
+
+test("SEC-12: vscode hardening is idempotent, keeps user values, never enables auto-approve, and --uninstall removes only what it added", async () => {
+  const { patchHarden, HARDEN_AUTOAPPROVE } = await import("../ar.mjs");
+  const mine = JSON.stringify({ "editor.fontSize": 14, "chat.tools.edits.autoApprove": { "**/*": true, "**/.env": true } });
+  const a = patchHarden(mine, {});
+  const cfgA = JSON.parse(a.text);
+  assert.equal(cfgA["editor.fontSize"], 14);
+  assert.equal(cfgA["chat.tools.edits.autoApprove"]["**/.env"], true, "the user's own choice is not overridden");
+  assert.deepEqual(a.kept, ["**/.env"]);
+  assert.equal(cfgA["chat.tools.edits.autoApprove"]["**/*.pem"], false);
+  assert.equal(cfgA["chat.agent.sandbox.enabled"], true);
+  assert.equal(cfgA["chat.tools.terminal.sandbox.enabled"], undefined);
+  assert.ok(!("chat.agent.autoApprove" in cfgA) && !JSON.stringify(cfgA).includes("autopilot"));
+  const b = patchHarden(a.text, { added: a.added });
+  assert.equal(b.text, a.text, "second run changes nothing");
+  assert.deepEqual(b.added, a.added);
+  const u = JSON.parse(patchHarden(b.text, { added: b.added }, { remove: true }).text);
+  assert.deepEqual(u, JSON.parse(mine), "uninstall restores exactly what was there before");
+  assert.equal(Object.keys(HARDEN_AUTOAPPROVE).length, 6);
+  assert.throws(() => patchHarden("{ // comment\n}"), /comments/);
+  assert.equal(JSON.parse(patchHarden("", {}, { sandbox: false }).text)["chat.agent.sandbox.enabled"], undefined);
+});
