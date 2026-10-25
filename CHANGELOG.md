@@ -12,7 +12,7 @@ Newest first. `node ar.mjs update` shows the entries newer than the version inst
 - Status bar shows `🔒` (safety on) and `🔒 sensível`; extension 0.3.0 (**run `node ar.mjs vscode` and reload VS Code**); footer shows safety mode, limit and quality warnings.
 - **Update note:** `routing.yaml` changes format. `node ar.mjs update --apply` replaces your v2 tiers with the v3 tables and keeps your pins, `switching` and `context` sections (the old file is in `data/update-backup-*`). The per-plan profiles A–F and `--profile auto` generation are gone (`--profile` is still accepted and ignored).
 
-## 0.4.0 — 2026-10-25
+## 0.4.0 — 2026-10-25 (released together with 0.5.0, as tag v0.5.0)
 Security hardening — full account, with what was verified for real and what is pending, in `docs/SECURITY-CHANGES.md`.
 - **Safety mode** (`SAFETY_MODE=on`, default; `node ar.mjs safety on|off`): models that may log, train on or let humans read your prompts (Gemini free tier, LLM7, OpenRouter `:free`, NVIDIA trial, Mistral free) leave every route, fallback and pin. **After updating, run `node ar.mjs omniroute` once and recreate the gateway, or Auto: Free stays blocked** (the pool must be verified and classified).
 - **DLP / sensitive guard** (`SENSITIVE_GUARD=on`): secrets and personal data (CPF, CNPJ, cards, e-mail, phone) and images are detected before any model; secrets are masked; sensitive requests only reach `trusted` models (Auto: Free refuses them with a message). Regex-based: limits in `docs/SECURITY.md`.
