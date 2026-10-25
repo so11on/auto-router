@@ -790,10 +790,21 @@ async function omniroute(flags) {
     poolKey = k.json.key; setEnv("FREE_POOL_KEY", poolKey); ok("created the OmniRoute API key and saved it in .env");
   }
 
-  const want = PROVIDERS.filter(([k]) => e[k]).map(([k, id]) => [id, e[k]]);
+  // SEC-09: with SAFETY_MODE=on only models whose class is not `unsafe` are registered or probed
+  const safe = String(e.SAFETY_MODE || "on").toLowerCase() !== "off";
+  const spec = JSON.parse(fs.readFileSync(path.join(ROOT, "profiles", "pool-models.json"), "utf8"));
+  for (const combo of ["free-fast", "free-coding"]) spec[combo] = (spec[combo] || []).map((x) => (typeof x === "string" ? { id: x, privacy: "unsafe" } : x));
+  const usable = (m) => !(safe && m.privacy === "unsafe") && !(flags["no-llm7"] && m.id.startsWith("llm7/"));
+  const providersWithModels = new Set(["free-fast", "free-coding"].flatMap((c) => spec[c].filter(usable).map((m) => m.id.split("/")[0])));
+  const want = PROVIDERS.filter(([k, id]) => e[k] && providersWithModels.has(id)).map(([k, id]) => [id, e[k]]);
   if (cfOk) want.push(["cloudflare-ai", e.CLOUDFLARE_API_TOKEN]);
-  if (!flags["no-llm7"]) want.push(["llm7", "unused"]);
-  if (!want.length) return bad("no provider keys in .env yet (and --no-llm7 given) — add keys, then rerun");
+  if (providersWithModels.has("llm7")) want.push(["llm7", "unused"]);
+  if (safe) {
+    const skipped = PROVIDERS.filter(([k, id]) => e[k] && !providersWithModels.has(id)).map(([, id]) => id);
+    if (skipped.length) info(`SAFETY_MODE=on: ${skipped.join(", ")} skipped (their free models may log or train on prompts). Use \`node ar.mjs safety off\` to include them.`);
+    if (e.GEMINI_FREE_API_KEY) info("SAFETY_MODE=on: GEMINI_FREE_API_KEY is not used (the free Gemini tier may train on prompts); it can stay empty.");
+  }
+  if (!want.length) return bad("no usable provider keys in .env yet — add keys (Groq, Ollama Cloud, Cloudflare), then rerun");
   const have = (await api("/api/providers")).json?.connections || [];
   const connected = new Set();
   const connect = async (id, key) => {
@@ -812,20 +823,20 @@ async function omniroute(flags) {
   for (const [id, key] of want) connIds[id] = await connect(id, key);
 
   // verify every candidate model with a real request, keep the ones that answer
-  const spec = JSON.parse(fs.readFileSync(path.join(ROOT, "profiles", "pool-models.json"), "utf8"));
   if (cfOk && connIds["cloudflare-ai"]) { // Workers AI model ids are discovered, then verified like all others
     const list = (await api(`/api/providers/${connIds["cloudflare-ai"]}/models`)).json?.models || [];
     const prefs = [/llama-3\.3-70b/, /gpt-oss-120b/, /gpt-oss-20b/, /glm-4\.7/, /gemma-4/, /qwen.*coder/];
     const picked = [];
     for (const re of prefs) { const m = list.find((x) => re.test(x.id) && !picked.includes(x.id)); if (m) picked.push(m.id); }
-    for (const id of picked.slice(0, 4)) { spec["free-coding"].push(`cloudflare-ai/${id}`); spec["free-fast"].push(`cloudflare-ai/${id}`); }
+    for (const id of picked.slice(0, 4)) for (const c of ["free-coding", "free-fast"]) spec[c].push({ id: `cloudflare-ai/${id}`, privacy: "no_retention" });
     info(`Cloudflare Workers AI candidates: ${picked.slice(0, 4).join(", ") || "none found"}`);
   }
   const bearer = { authorization: `Bearer ${poolKey}` };
   const good = { "free-fast": [], "free-coding": [] };
   const probed = new Map();
   for (const combo of Object.keys(good)) {
-    for (const model of spec[combo] || []) {
+    for (const entry of (spec[combo] || []).filter(usable)) {
+      const model = entry.id;
       const prov = model.split("/")[0];
       if (!connected.has(prov)) continue;
       if (!probed.has(model)) {
@@ -840,22 +851,27 @@ async function omniroute(flags) {
         probed.set(model, r.status === 200 && (m?.content || m?.reasoning || m?.reasoning_content) ? "ok" : `fail ${r.status}`);
         await sleep(700);
       }
-      if (probed.get(model) === "ok") good[combo].push(model);
+      if (probed.get(model) === "ok") good[combo].push(entry);
     }
   }
   for (const [model, res] of probed) (res === "ok" ? ok : warn)(`${model}: ${res === "ok" ? "answers" : "dropped (" + res + ")"}`);
 
   const combos = (await api("/api/combos")).json?.combos || [];
-  let usable = 0;
-  for (const [name, models] of Object.entries(good)) {
+  let usableCombos = 0;
+  for (const [name, entries] of Object.entries(good)) {
+    const models = entries.map((x) => x.id);
     if (!models.length) { warn(`combo ${name}: no working model — skipped`); continue; }
-    usable++;
+    usableCombos++;
     const ex = combos.find((x) => x.name === name);
     const r = ex ? await api(`/api/combos/${ex.id}`, { method: "PUT", body: { models } })
                  : await api("/api/combos", { method: "POST", body: { name, strategy: "priority", models } });
     (r.status < 300 ? ok : bad)(`combo ${name}: ${models.length} models${r.status < 300 ? "" : " (" + r.text.slice(0, 80) + ")"}`);
   }
-  if (usable === 2) { setEnv("FREE_POOL_ENABLED", "true"); ok("FREE_POOL_ENABLED=true"); }
+  // classes of the members that really answer: the gateway derives the privacy of free-pool* from this file
+  fs.mkdirSync(DATA, { recursive: true });
+  fs.writeFileSync(path.join(DATA, "pool-members.json"), JSON.stringify(good, null, 2) + "\n");
+  ok(`wrote data/pool-members.json (${Object.values(good).flat().length} members, none "unsafe": ${!Object.values(good).flat().some((x) => x.privacy === "unsafe") || !safe})`);
+  if (usableCombos === 2) { setEnv("FREE_POOL_ENABLED", "true"); ok("FREE_POOL_ENABLED=true"); }
   else warn("both combos need at least one working model; FREE_POOL_ENABLED left as is");
   info("Apply to the gateway: docker compose up -d --force-recreate litellm");
 }

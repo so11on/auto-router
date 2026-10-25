@@ -253,3 +253,16 @@ test("SEC-10: roots may not contain the auto-router itself, the home folder or t
     assert.equal(rootProblems([path.parse(os.tmpdir()).root], repo, home)[0].fatal, true);
   } finally { for (const d of [repo, other, home]) fs.rmSync(d, { recursive: true, force: true }); }
 });
+
+test("SEC-09: every pool candidate declares a privacy class and the providers needing a key are known", () => {
+  const spec = JSON.parse(fs.readFileSync(path.join(ROOT, "profiles", "pool-models.json"), "utf8"));
+  for (const combo of ["free-fast", "free-coding"]) {
+    assert.ok(spec[combo].length > 0);
+    for (const m of spec[combo]) {
+      assert.match(m.id, /^[a-z0-9-]+\//);
+      assert.ok(["trusted", "no_retention", "restricted", "unsafe"].includes(m.privacy), m.id);
+    }
+  }
+  assert.ok(spec["free-fast"].some((m) => m.privacy !== "unsafe"), "with SAFETY_MODE=on the fast combo must still have members");
+  assert.ok(spec["free-coding"].some((m) => m.privacy !== "unsafe"));
+});

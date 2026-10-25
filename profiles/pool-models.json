@@ -1,22 +1,67 @@
 {
-  "_comment": "Models the installer tries to put in the OmniRoute combos, in priority order. Each is probed with a real request before it is kept. Verified on 2026-10-24 (OpenRouter's minimax :free model returned 404 and was removed); free tiers rotate, so the probe decides. Format: <omniroute provider>/<model id as the provider names it>.",
+  "_comment": "Models the installer tries to put in the OmniRoute combos, in priority order, each with its privacy class (see litellm/models.yaml for the classes). With SAFETY_MODE=on, `unsafe` entries are neither registered nor probed. Each kept model is probed with a real request first. Verified on 2026-10-24 (OpenRouter's minimax :free model returned 404 and was removed); free tiers rotate, so the probe decides. Format: <omniroute provider>/<model id as the provider names it>. Classes verified from each provider's published terms on 2026-10-25 -- see docs/SECURITY.md.",
   "free-fast": [
-    "groq/openai/gpt-oss-20b",
-    "groq/qwen/qwen3.8-27b",
-    "llm7/DeepSeek-V4-Flash-0731",
-    "ollama-cloud/gemma4:31b",
-    "ollama-cloud/nemotron-3-super"
+    {
+      "id": "groq/openai/gpt-oss-20b",
+      "privacy": "no_retention"
+    },
+    {
+      "id": "groq/qwen/qwen3.8-27b",
+      "privacy": "no_retention"
+    },
+    {
+      "id": "llm7/DeepSeek-V4-Flash-0731",
+      "privacy": "unsafe"
+    },
+    {
+      "id": "ollama-cloud/gemma4:31b",
+      "privacy": "no_retention"
+    },
+    {
+      "id": "ollama-cloud/nemotron-3-super",
+      "privacy": "no_retention"
+    }
   ],
   "free-coding": [
-    "groq/openai/gpt-oss-120b",
-    "mistral/codestral-latest",
-    "llm7/DeepSeek-V4-Flash-0731",
-    "nvidia/nvidia/nemotron-3-ultra-550b-a55b",
-    "ollama-cloud/nemotron-3-super",
-    "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
-    "openrouter/cohere/north-mini-code:free",
-    "openrouter/poolside/laguna-s-2.1:free",
-    "groq/qwen/qwen3.8-27b",
-    "ollama-cloud/gemma4:31b"
+    {
+      "id": "groq/openai/gpt-oss-120b",
+      "privacy": "no_retention"
+    },
+    {
+      "id": "mistral/codestral-latest",
+      "privacy": "unsafe"
+    },
+    {
+      "id": "llm7/DeepSeek-V4-Flash-0731",
+      "privacy": "unsafe"
+    },
+    {
+      "id": "nvidia/nvidia/nemotron-3-ultra-550b-a55b",
+      "privacy": "unsafe"
+    },
+    {
+      "id": "ollama-cloud/nemotron-3-super",
+      "privacy": "no_retention"
+    },
+    {
+      "id": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+      "privacy": "unsafe"
+    },
+    {
+      "id": "openrouter/cohere/north-mini-code:free",
+      "privacy": "unsafe"
+    },
+    {
+      "id": "openrouter/poolside/laguna-s-2.1:free",
+      "privacy": "unsafe"
+    },
+    {
+      "id": "groq/qwen/qwen3.8-27b",
+      "privacy": "no_retention"
+    },
+    {
+      "id": "ollama-cloud/gemma4:31b",
+      "privacy": "no_retention"
+    }
   ]
 }
