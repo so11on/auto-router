@@ -79,3 +79,12 @@ Models `copilot-code-mini|main|max` run `copilot -p <prompt> -s --no-ask-user [-
 - **Environment:** `GH_TOKEN`, `GITHUB_TOKEN`, `COPILOT_GITHUB_TOKEN` are removed so the signed-in Copilot account is used; auto-update is disabled.
 - **Limits:** messages mentioning limit/quota/premium become HTTP 429 (the gateway falls back). Premium-request balance cannot be read, so there is no forecast for this route.
 - **Status:** verified against a stand-in CLI (`tests/fake_copilot.sh`); no real Copilot CLI was available on the development machine (the account there is on the free plan). `node ar.mjs copilot --check` verifies it for real.
+
+## Protection against reading secrets (SEC-11)
+Claude Code reads files straight from disk, so the gateway's DLP never sees them. The bridge therefore starts **every**
+`claude` run with `--settings` built from [`claude-bridge/settings.bridge.json`](../claude-bridge/settings.bridge.json):
+- `permissions.deny` for `.env*`, `*.pem`, `*.key`, `id_rsa*`, `secrets/`, `.aws/`, `.ssh/`, `*credential*` (Read and Edit; Edit rules also cover Write) and `Bash(env)`, `Bash(printenv*)`, `Bash(cat *.env*)`;
+- a `PreToolUse` hook, [`hooks/protect-sensitive.mjs`](../claude-bridge/hooks/protect-sensitive.mjs), that resolves the real path (symlinks included) and blocks the same files plus commands that print the environment. It exits with code 2, which Claude Code treats as a block.
+
+Verified 2026-10-25 on Claude Code 2.1.304 with a temporary project holding `.env` (`SECRET=abc123`): reading it, `cat .env` and `printenv` were all refused, both with the full settings and with the hook alone, and the value never appeared in the answer.
+Limits: the guard works on names and patterns, so a secret stored in a file with an ordinary name is not caught; Codex and Copilot CLIs have no equivalent hook (no mechanism found in `codex exec --help`), so those routes rely on the sandbox and on keeping secrets outside `BRIDGE_ALLOWED_ROOTS`.

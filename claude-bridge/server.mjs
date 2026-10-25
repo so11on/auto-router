@@ -52,6 +52,14 @@ const MODELS = {
   "claude-code-sonnet": process.env.CC_SONNET || "claude-sonnet-5-5",
   "claude-code-opus": process.env.CC_OPUS || "claude-opus-5-5",
 };
+// SEC-11: every `claude` run gets deny rules + a PreToolUse hook that stop it from reading secret files (the gateway's DLP cannot see disk reads).
+const HOOK_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "hooks", "protect-sensitive.mjs");
+const PROTECT_SETTINGS = (() => {
+  try {
+    const tpl = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "settings.bridge.json"), "utf8");
+    return JSON.stringify(JSON.parse(tpl.replace("{{HOOK}}", HOOK_PATH.replace(/\\/g, "/"))));
+  } catch (e) { console.error("claude-bridge: settings.bridge.json is required (SEC-11):", e.message); process.exit(1); }
+})();
 const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 // ---- OpenAI Codex CLI (ChatGPT Plus/Pro sign-in) ----
 const CODEX_BIN = process.env.CODEX_BIN || "codex";
@@ -270,6 +278,7 @@ async function handle(req, res, body) {
     const args = ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
       "--model", cliModel, "--permission-mode", permission];
     if (permission !== "plan" && ALLOWED_TOOLS) args.push("--allowedTools", IS_WIN ? `"${ALLOWED_TOOLS}"` : ALLOWED_TOOLS);
+    args.push("--settings", PROTECT_SETTINGS);
     if (effort) args.push("--effort", effort);
     args.push(resuming ? "--resume" : "--session-id", sessionId);
 

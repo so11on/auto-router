@@ -113,6 +113,7 @@ test("SEC-01: callers cannot pick dangerous permission modes, sandboxes or unkno
     const text = c.choices[0].message.content;
     assert.match(text, /--permission-mode acceptEdits/);
     assert.doesNotMatch(text, /bypassPermissions/);
+    assert.match(text, /--settings .*protect-sensitive\.mjs/, "SEC-11: every claude run carries the protection settings");
     const ok = await (await post(port, { model: "claude-code-haiku", messages: msgs }, { "x-claude-mode": "plan" })).json();
     assert.match(ok.choices[0].message.content, /--permission-mode plan/);
     const x = await (await post(port, { model: "codex-code-main", tools: [{ type: "function" }], messages: msgs }, { "x-codex-sandbox": "danger-full-access" })).json();
