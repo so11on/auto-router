@@ -6,7 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseEnv, setEnvText, patchProviders, buildProvider, vscodeUserDir, openaiBlocks, applyBlocks, buildRoutingText, familiesFrom, copilotBlocks, LADDER, planSync, applySync, mergeEnv, mergeRouting, mergeConfig, mergeCompose, composeImage, setComposeImage, changelogSince } from "../ar.mjs";
+import { parseEnv, setEnvText, patchProviders, buildProvider, vscodeUserDir, openaiBlocks, applyBlocks, familiesFrom, copilotBlocks, planSync, applySync, mergeEnv, mergeRouting, mergeConfig, mergeCompose, composeImage, setComposeImage, changelogSince } from "../ar.mjs";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -54,33 +54,6 @@ test("openai blocks: routes, fallbacks and managed markers in config.yaml", () =
   assert.throws(() => applyBlocks("no markers", begin, end, "x"), /not found/);
 });
 
-const BASE = fs.readFileSync(path.join(ROOT, "profiles", "routing.A.yaml"), "utf8");
-const tiers = (text, mode) => text.split(`  ${mode}:\n`)[1].split(/\n  \w+:\n|\n\n/)[0].split("\n").map((l) => l.trim());
-
-test("profile auto: Claude+Gemini+pool reproduces the hand-made profile A tables", () => {
-  const out = buildRoutingText(["claude", "gemini"], true, BASE);
-  assert.deepEqual(tiers(out, "balanced"), tiers(BASE, "balanced"));
-  assert.deepEqual(tiers(out, "smart"), tiers(BASE, "smart"));
-  assert.deepEqual(tiers(out, "free"), tiers(BASE, "free"));
-  assert.match(out, /^# Profile "auto"/);
-  assert.match(out, /pins:/);
-});
-
-test("profile auto: copilot, openai, free-only and no-pool combinations", () => {
-  const cp = buildRoutingText(["copilot"], true, BASE);
-  assert.match(tiers(cp, "smart").join(" "), /copilot-max/);
-  assert.ok(!/claude-|gpt-|gemini-/.test(tiers(cp, "smart").join(" ") + tiers(cp, "balanced").join(" ")));
-  const both = buildRoutingText(["openai", "copilot", "gemini"], true, BASE);
-  assert.match(tiers(both, "smart").join(" "), /gpt-max/, "openai leads over copilot when both exist");
-  assert.match(tiers(both, "balanced").join(" "), /gemini-flash-lite.*gemini-flash/s, "gemini covers the cheap rungs");
-  const free = buildRoutingText([], true, BASE);
-  assert.deepEqual(tiers(free, "smart"), ["- {max_complexity: 5, model: free-pool-coding}"]);
-  const noPool = buildRoutingText(["claude"], false, BASE);
-  assert.ok(!/free-pool/.test(tiers(noPool, "balanced").join(" ")));
-  assert.match(tiers(noPool, "free").join(" "), /gemini-free-flash-lite/);
-  for (const f of Object.keys(LADDER)) assert.ok(LADDER[f].lo && LADDER[f].mid && LADDER[f].hi);
-});
-
 test("familiesFrom maps detected plans to routing families", () => {
   const d = { claude: { cli: true, loggedIn: true }, openai: { cli: true, loggedIn: false, apiKey: false }, copilot: { cli: true, paid: true }, gemini: { paidKey: false } };
   assert.deepEqual(familiesFrom(d), ["claude", "copilot"]);
@@ -99,9 +72,10 @@ test("copilot blocks and fresh install with --profile auto", () => {
   const r = spawnSync(process.execPath, [path.join(copy, "ar.mjs"), "init", "--roots", path.join(home, "code"), "--profile", "auto", "--families", "copilot,gemini"],
     { encoding: "utf8", env: { ...process.env, HOME: home, USERPROFILE: home } });
   assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /plans found: copilot, gemini/);
   const routing = fs.readFileSync(path.join(copy, "litellm", "routing.yaml"), "utf8");
-  assert.match(routing, /for: copilot, gemini|for: copilot, gemini \+ free pool/);
-  assert.match(routing, /copilot-max/);
+  assert.match(routing, /^routes:/m);
+  assert.match(routing, /copilot-max/, "the copilot pins ship with the table");
   assert.equal(parseEnv(fs.readFileSync(path.join(copy, ".env"), "utf8")).CLASSIFIER_MODEL, "gemini/gemini-3.5-flash-lite");
   fs.rmSync(tmp, { recursive: true, force: true });
 });
@@ -113,8 +87,10 @@ function oldInstall() {
   fs.cpSync(ROOT, dir, { recursive: true, filter: (s) => !/[\\/](\.git|data|node_modules|\.auto-router)([\\/]|$)/.test(s) && !/[\\/]\.env(\.bak)?$/.test(s) });
   fs.rmSync(path.join(dir, "VERSION")); fs.rmSync(path.join(dir, "CHANGELOG.md")); fs.rmSync(path.join(dir, "docs", "GET-KEYS.md"));
   const rp = path.join(dir, "litellm", "routing.yaml");
-  fs.writeFileSync(rp, fs.readFileSync(rp, "utf8").replace(/  (gpt|gpt-max|gpt-mini|copilot|copilot-max|copilot-mini):.*\n/g, "").replace(/\n# Mid-task model switching[\s\S]*?(?=\n# Context control)/, "").replace("max_complexity: 3, model: gemini-flash}", "max_complexity: 3, model: gemini-flash-lite}") // user tuning
-  );
+  // the routing.yaml of release 0.3.0 (v2 format, tiers by complexity) with a tier the user tuned and a pin of their own
+  fs.writeFileSync(rp, fs.readFileSync(path.join(ROOT, "tests", "fixtures", "routing.v2.yaml"), "utf8")
+    .replace(/  (gpt|gpt-max|gpt-mini|copilot|copilot-max|copilot-mini):.*\n/g, "").replace(/\n# Mid-task model switching[\s\S]*?(?=\n# Context control)/, "")
+    .replace("max_complexity: 3, model: gemini-flash}", "max_complexity: 3, model: gemini-flash-lite}").replace("pins:\n", "pins:\n  mine:     {model: gemini-pro}\n"));
   const cp = path.join(dir, "litellm", "config.yaml");
   fs.writeFileSync(cp, fs.readFileSync(cp, "utf8").replace(/ *# >>> (openai|copilot)[^\n]*\n[\s\S]*?# <<< (openai|copilot)[^\n]*\n/g, ""));
   fs.writeFileSync(path.join(dir, ".env"), "LITELLM_MASTER_KEY=sk-mine\nGROQ_API_KEY=gsk_mine\nCLAUDE_PRIMARY=api\nBRIDGE_KEY=b\nBRIDGE_ALLOWED_ROOTS=/x\nFREE_POOL_ENABLED=true\n");
@@ -145,7 +121,10 @@ test("update: an old install gets the new features and keeps every user choice",
   assert.equal(fs.readFileSync(path.join(dir, "data", "usage.jsonl"), "utf8"), "{}\n");
   // routing: user tuning kept, new pins and sections added
   const r = fs.readFileSync(path.join(dir, "litellm", "routing.yaml"), "utf8");
-  assert.match(r, /max_complexity: 3, model: gemini-flash-lite\}/, "the user's tier edit survives");
+  assert.match(r, /^routes:/m, "v2 tables are replaced by the v3 ones (the old file is in the backup)");
+  assert.doesNotMatch(r, /^modes:/m);
+  assert.match(fs.readFileSync(path.join(backup, "litellm", "routing.yaml"), "utf8"), /max_complexity: 3, model: gemini-flash-lite/, "the old tiers are in the backup");
+  assert.match(r, /^  mine: /m, "the user's own pin is kept");
   for (const pin of ["gpt", "gpt-max", "copilot", "copilot-max", "copilot-mini"]) assert.match(r, new RegExp(`^  ${pin}:`, "m"));
   assert.match(r, /^switching:/m); assert.match(r, /^context:/m);
   assert.equal((r.match(/^pins:/gm) || []).length, 1);
@@ -167,8 +146,15 @@ test("update helpers: env defaults, routing pin merge, changelog filter, nothing
   const m = mergeEnv("A=1\n", ex);
   assert.match(m.text, /# comment for X\nX=default\nSECRET=\n$/);
   assert.equal(mergeEnv(m.text, ex).text, m.text, "no duplicates on a second run");
-  const merged = mergeRouting("modes:\n  free:\n    - {max_complexity: 5, model: a}\n\npins:\n  opus:     {model: claude-opus}\n", "pins:\n  opus:     {model: claude-opus}\n  gpt:      {model: gpt-main}\n");
-  assert.match(merged, /opus:.*\n  gpt: /);
+  const up = "profiles:\n  free: {}\n\naliases:\n  a: x\n  b: y\n\nroutes:\n  free: {}\n\npins:\n  opus:     {model: claude-opus}\n  gpt:      {model: gpt-main}\n\nswitching:\n  checkpoint_every: 4\n";
+  // v2 install: the v3 tables win, the user's pins and switching values are kept
+  const fromV2 = mergeRouting("modes:\n  free:\n    - {max_complexity: 5, model: a}\n\npins:\n  opus:     {model: claude-opus}\n  mine:     {model: x}\n\nswitching:\n  checkpoint_every: 9\n", up);
+  assert.match(fromV2, /^routes:/m); assert.doesNotMatch(fromV2, /^modes:/m);
+  assert.match(fromV2, /^  mine: /m); assert.match(fromV2, /^  gpt: /m); assert.match(fromV2, /checkpoint_every: 9/);
+  // v3 install: the user's tables stay, new aliases / pins / sections arrive
+  const fromV3 = mergeRouting("profiles:\n  free: {tuned: true}\n\naliases:\n  a: x\n\nroutes:\n  free: {mine: 1}\n\npins:\n  opus:     {model: claude-opus}\n", up);
+  assert.match(fromV3, /tuned: true/); assert.match(fromV3, /mine: 1/); assert.match(fromV3, /^  b: y/m); assert.match(fromV3, /^  gpt: /m); assert.match(fromV3, /^switching:/m);
+  assert.equal(mergeRouting(fromV3, up), fromV3, "idempotent");
   const log = "# Changelog\n\n## 0.3.0 — d\n- c\n\n## 0.2.0 — d\n- b\n\n## 0.1.0 — d\n- a\n";
   assert.match(changelogSince(log, "0.2.0"), /0\.3\.0/);
   assert.ok(!changelogSince(log, "0.2.0").includes("0.2.0"));
@@ -177,14 +163,10 @@ test("update helpers: env defaults, routing pin merge, changelog filter, nothing
   assert.equal(mergeConfig("x", "y"), "y");
 });
 
-test("profiles A-F exist, are valid, and every model they name is defined or a known family", () => {
-  for (const p of "ABCDEF") {
-    const t = fs.readFileSync(path.join(ROOT, "profiles", `routing.${p}.yaml`), "utf8");
-    assert.match(t, /modes:/);
-    assert.match(t, /pins:/);
-  }
-  assert.match(fs.readFileSync(path.join(ROOT, "profiles", "routing.E.yaml"), "utf8"), /gpt-max/);
-  assert.ok(!/claude-/.test(fs.readFileSync(path.join(ROOT, "profiles", "routing.F.yaml"), "utf8").split("# Pins:")[0].split("modes:")[1]));
+test("routing v3: one shipped table, no per-plan profile files", () => {
+  assert.ok(!fs.readdirSync(path.join(ROOT, "profiles")).some((f) => /^routing\./.test(f)));
+  const r = fs.readFileSync(path.join(ROOT, "litellm", "routing.yaml"), "utf8");
+  for (const k of ["profiles", "task_adjust", "scarcity", "aliases", "routes", "pins", "switching", "context"]) assert.match(r, new RegExp(`^${k}:`, "m"));
 });
 
 test("vscodeUserDir is OS specific and ends with User", () => {
@@ -210,7 +192,7 @@ test("fresh install: init creates .env with generated secrets, profile and local
   assert.equal(e.CLAUDE_PRIMARY, "api");
   assert.equal(e.CLASSIFIER_MODEL, "pool");
   assert.equal(e.GEMINI_API_KEY, "");
-  assert.match(fs.readFileSync(path.join(copy, "litellm", "routing.yaml"), "utf8"), /Profile D/);
+  assert.match(fs.readFileSync(path.join(copy, "litellm", "routing.yaml"), "utf8"), /^routes:/m);
   const cfg = JSON.parse(fs.readFileSync(path.join(home, ".auto-router", "config.json"), "utf8"));
   assert.equal(fs.realpathSync(cfg.repo), fs.realpathSync(copy));
   const vs = path.join(tmp, "vscode-user");

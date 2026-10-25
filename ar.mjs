@@ -229,8 +229,7 @@ export function rootProblems(roots, repo = ROOT, home = os.homedir()) {
 function init(flags) {
   const profile = String(flags.profile || "A").toUpperCase();
   const auto = profile === "AUTO";
-  const pf = path.join(ROOT, "profiles", `routing.${auto ? "A" : profile}.yaml`);
-  if (!fs.existsSync(pf)) { bad(`unknown profile ${profile} (use A-F or auto — see profiles/)`); process.exit(1); }
+  if (!auto && !/^[A-F]$/.test(profile)) { bad(`unknown profile ${profile} (routing v3 needs none: use auto, or omit --profile)`); process.exit(1); }
   const claude = String(flags.claude || "cli");
   if (!["cli", "api", "none"].includes(claude)) { bad("--claude must be cli, api or none"); process.exit(1); }
   const safetyFlag = String(flags.safety || "on").toLowerCase();
@@ -267,19 +266,17 @@ function init(flags) {
     fs.writeFileSync(ENV_FILE, t, { mode: 0o600 });
     ok("created .env with generated secrets (permissions restricted)");
   }
-  // routing profile
+  // routing v3: one table for everybody (litellm/routing.yaml). A model you cannot use (no key, not configured, not allowed by the
+  // safety settings) is skipped at run time, so there is nothing to generate per plan any more.
   const target = path.join(ROOT, "litellm", "routing.yaml");
-  let routingText = fs.readFileSync(pf, "utf8");
-  if (auto) {
-    const families = flags.families !== undefined ? String(flags.families).split(",").map((x) => x.trim()).filter(Boolean) : familiesFrom(detectPlans());
-    const bad2 = families.filter((f) => !LADDER[f]);
-    if (bad2.length) { bad(`unknown family: ${bad2.join(", ")} (use claude, openai, copilot, gemini)`); process.exit(1); }
-    routingText = buildRoutingText(families, String(flags.pool ?? "yes") !== "no", routingText);
-    info(`routing built for: ${families.join(", ") || "free providers only"}`);
+  const families = flags.families !== undefined ? String(flags.families).split(",").map((x) => x.trim()).filter(Boolean) : (auto ? familiesFrom(detectPlans()) : []);
+  const badFam = families.filter((f) => !["claude", "openai", "copilot", "gemini"].includes(f));
+  if (badFam.length) { bad(`unknown family: ${badFam.join(", ")} (use claude, openai, copilot, gemini)`); process.exit(1); }
+  if (fs.existsSync(target) && !/^routes:/m.test(fs.readFileSync(target, "utf8"))) {
+    fs.copyFileSync(target, target + ".v2.bak");
+    warn("litellm/routing.yaml was in the old format (v2): run `node ar.mjs update --apply` to get the v3 tables (your pins and settings are kept)");
   }
-  if (fs.existsSync(target) && fs.readFileSync(target, "utf8") !== routingText) fs.copyFileSync(target, target + ".bak");
-  fs.writeFileSync(target, routingText);
-  ok(`routing profile ${auto ? "auto" : profile} → litellm/routing.yaml`);
+  ok(`routing v3 (litellm/routing.yaml) — plans found: ${families.join(", ") || "free providers only"}; models you cannot use are skipped automatically`);
   // data/ stays 0755 on Linux: the container's root has no capabilities (cap_drop ALL) and could not write a 0700 folder owned by you
   fs.mkdirSync(DATA, { recursive: true, ...(process.platform === "linux" ? {} : { mode: 0o700 }) });
   fs.mkdirSync(HOME_CFG_DIR, { recursive: true, mode: 0o700 });
@@ -341,43 +338,6 @@ async function cloudflareCheck(e) {
   return `${c(31, "FAILS")}  Cloudflare: HTTP ${r.status} ${(r.json?.errors?.[0]?.message) || ""} — ${why}`;
 }
 
-// ---------------------------------------------------------------- routing generator (profile "auto")
-export const LADDER = {
-  claude: { lo: "claude-haiku", mid: "claude-sonnet", hi: "claude-opus" },
-  openai: { lo: "gpt-mini", mid: "gpt-main", hi: "gpt-max" },
-  copilot: { lo: "copilot-mini", mid: "copilot-main", hi: "copilot-max" },
-  gemini: { lo: "gemini-flash-lite", mid: "gemini-flash", hi: "gemini-pro" },
-};
-const STRENGTH = ["claude", "openai", "copilot", "gemini"];   // who leads the Smart profile
-const CHEAPNESS = ["gemini", "copilot", "claude", "openai"];  // who covers the cheap rungs of Balanced
-function tiersYaml(tiers) {
-  const merged = [];
-  for (const t of tiers) {
-    const last = merged[merged.length - 1];
-    if (last && last.model === t.model && last.effort === t.effort) last.max = t.max; else merged.push({ ...t });
-  }
-  return merged.map((t) => `    - {max_complexity: ${t.max}, model: ${t.model}${t.effort ? `, effort: ${t.effort}` : ""}}`).join("\n");
-}
-export function buildRoutingText(families, pool, base) {
-  const fams = STRENGTH.filter((f) => families.includes(f));
-  const best = fams[0], cheap = CHEAPNESS.find((f) => fams.includes(f));
-  const free = [{ max: 2, model: "free-pool-fast" }, { max: 5, model: "free-pool-coding" }];
-  let balanced, smart;
-  if (!best) { balanced = free; smart = [{ max: 5, model: "free-pool-coding" }]; }
-  else {
-    const B = LADDER[best], C = LADDER[cheap];
-    balanced = [{ max: 1, model: pool ? "free-pool-fast" : C.lo }, { max: 2, model: C.lo }, { max: 3, model: C.mid },
-      { max: 4, model: B.mid, effort: "low" }, { max: 5, model: B.mid, effort: "medium" }];
-    smart = [{ max: 1, model: B.lo }, { max: 2, model: B.mid, effort: "low" }, { max: 3, model: B.mid, effort: "medium" },
-      { max: 4, model: B.hi, effort: "medium" }, { max: 5, model: B.hi, effort: "high" }];
-  }
-  const freeTiers = pool ? free : (best ? [{ max: 5, model: "gemini-free-flash-lite" }] : free);
-  const head = base.slice(0, base.indexOf("modes:")).replace(/^# Profile .*\n/, "");
-  const tail = base.slice(base.indexOf("# Pins:"));
-  return `# Profile "auto": generated by \`node ar.mjs init --profile auto\` for: ${fams.join(", ") || "free providers only"}${pool ? " + free pool" : ""}. Edit freely.\n` + head +
-    `modes:\n  free:\n${tiersYaml(freeTiers)}\n  balanced:\n${tiersYaml(balanced)}\n  smart:\n${tiersYaml(smart)}\n\n` + tail;
-}
-
 // ---------------------------------------------------------------- update
 const REPO_DEFAULT = "so11on/auto-router";
 // never overwritten, never deleted: secrets, runtime data, backups, VCS
@@ -420,22 +380,40 @@ export function mergeConfig(local, upstream) {
   }
   return out;
 }
-/** Keep the user's tuned routing.yaml; add what the new version introduced (new pins, new switching/context sections). */
+/** Split a YAML file into its top-level sections: { head, order: [keys], sections: {key: text} }. Comments before a key belong to the previous section. */
+function yamlSections(text) {
+  const parts = text.split(/^(?=[A-Za-z_][\w-]*:)/m);
+  const head = /^[A-Za-z_][\w-]*:/.test(parts[0]) ? "" : parts.shift();
+  const sections = {}, order = [];
+  for (const p of parts) { const k = p.match(/^([A-Za-z_][\w-]*):/)[1]; sections[k] = p; order.push(k); }
+  return { head, order, sections };
+}
+const entriesOf = (section) => [...(section || "").matchAll(/^  ([\w-]+):\s*(.*)$/gm)].map((m) => [m[1], m[0]]);
+/** Add the entries (`  name: value` lines) that upstream has in a section and the local one lacks. */
+function addEntries(localSection, upstreamSection) {
+  const have = new Set(entriesOf(localSection).map(([n]) => n));
+  const missing = entriesOf(upstreamSection).filter(([n]) => !have.has(n));
+  if (!missing.length) return localSection;
+  const trimmed = localSection.replace(/\s*$/, "\n");
+  const tail = localSection.slice(trimmed.trimEnd().length).includes("\n\n") ? "\n" : "";
+  return trimmed + missing.map(([, l]) => l).join("\n") + "\n" + tail;
+}
+/** `update` for routing.yaml. v2 (modes:) -> take the v3 tables, keep the user's pins/switching/context. v3 -> keep the user's tables and settings,
+ *  add what the new version introduced (new sections, aliases, pins). The replaced file is backed up by `update`. */
 export function mergeRouting(local, upstream) {
-  let out = local;
-  const pinNames = (t) => { const m = t.match(/(?:^|\n)pins:\n((?:  .*\n?)+)/); return m ? [...m[1].matchAll(/^  ([\w-]+):\s*\{.*\}.*$/gm)].map((x) => [x[1], x[0]]) : []; };
-  const have = new Set(pinNames(out).map(([n]) => n));
-  const missing = pinNames(upstream).filter(([n]) => !have.has(n));
-  if (missing.length) {
-    if (/(?:^|\n)pins:\n/.test(out)) out = out.replace(/((?:^|\n)pins:\n(?:  .*\n?)+)/, (m) => m.replace(/\n?$/, "\n") + missing.map(([, l]) => l).join("\n") + "\n");
-    else out = out.replace(/\s*$/, "\n") + "\npins:\n" + missing.map(([, l]) => l).join("\n") + "\n";
+  const L = yamlSections(local), U = yamlSections(upstream);
+  if (!("routes" in L.sections)) {
+    const out = { ...U.sections };
+    for (const k of ["switching", "context"]) if (L.sections[k]) out[k] = L.sections[k];
+    if (L.sections.pins) out.pins = addEntries(L.sections.pins, U.sections.pins || "");
+    if (out.pins && !out.pins.endsWith("\n\n") && U.order.indexOf("pins") < U.order.length - 1) out.pins = out.pins.replace(/\s*$/, "\n\n");
+    return U.head + U.order.map((k) => out[k]).join("");
   }
-  for (const key of ["switching", "context"]) {
-    if (new RegExp(`^${key}:`, "m").test(out)) continue;
-    const m = upstream.match(new RegExp(`((?:^#.*\\n)*)^${key}:\\n(?:  .*\\n?)+`, "m"));
-    if (m) out = out.replace(/\s*$/, "\n\n") + m[0].replace(/\n?$/, "\n");
-  }
-  return out;
+  const out = { ...L.sections }, order = [...L.order];
+  for (const k of U.order) if (!(k in out)) { out[k] = U.sections[k]; order.push(k); }
+  for (const k of ["aliases", "pins"]) if (out[k] && U.sections[k]) out[k] = addEntries(out[k], U.sections[k]);
+  const done = order.map((k) => (out[k].endsWith("\n") ? out[k] : out[k] + "\n"));
+  return L.head + done.map((s, i) => (i > 0 && !/\n\n$|\n#[^\n]*\n$/.test(done[i - 1]) && !s.startsWith("\n") ? "\n" + s : s)).join("");
 }
 /** Append variables introduced by the new .env.example with the example's default value and their comments. Never touches existing values. */
 export function mergeEnv(localText, exampleText) {
@@ -1233,6 +1211,25 @@ async function logs(flags) {
     }
   }
 }
+async function tune(flags) {
+  const { propose, applyProposals } = await import("./scripts/tune.mjs");
+  const routingFile = path.join(ROOT, "litellm", "routing.yaml"), stateFile = path.join(DATA, "tune-state.json");
+  const rows = readEvents().filter((r) => r.ts >= sinceTs(flags.since || "30d"));
+  let state = {}; try { state = JSON.parse(fs.readFileSync(stateFile, "utf8")); } catch {}
+  const routingText = fs.readFileSync(routingFile, "utf8"), modelsText = fs.readFileSync(path.join(ROOT, "litellm", "models.yaml"), "utf8");
+  const safetyOn = String((readEnv() || {}).SAFETY_MODE || "on").toLowerCase() !== "off";
+  const proposals = propose({ rows, routingText, modelsText, safetyOn, state });
+  const routes = rows.filter((r) => r.type === "route").length;
+  console.log(`Learning from ${routes} routed requests since ${flags.since || "30d"} (a model needs 20 uses in a cell to be judged; one move per cell per week).\n`);
+  if (!proposals.length) return console.log("No change proposed.");
+  for (const p of proposals) info(`${p.profile}/${p.task}/${p.band}: move ${p.alias} ${p.move} (${p.uses} uses, ${Math.round(p.rate * 100)}% failed)`);
+  if (!flags.apply) return warn("dry run — nothing changed. To apply: node ar.mjs tune --apply   (routing.yaml.bak keeps the old file)");
+  fs.copyFileSync(routingFile, routingFile + ".bak");
+  fs.writeFileSync(routingFile, applyProposals(routingText, proposals));
+  for (const p of proposals) state[p.key] = Date.now() / 1000;
+  fs.writeFileSync(stateFile, JSON.stringify(state), { mode: 0o600 });
+  ok(`applied ${proposals.length} change(s). routing.yaml is read on every request: no restart needed.`);
+}
 function usage(flags) {
   const since = sinceTs(flags.since || "24h");
   const key = { model: "model_group", mode: "mode", task: "task" }[flags.by || "model"] || "model_group";
@@ -1275,6 +1272,7 @@ const HELP = `auto-router — node ar.mjs <command>
   vscode      [--uninstall] [--insiders] [--dir <path>] [--harden]   --harden: optional safer VS Code settings (backs up settings.json)
   smoke       one request per profile
   logs        [-f] [--errors] [--tail N] [--type T] [--rid ID] [--since 30m] [--raw]
+  tune        [--since 30d] [--apply]   learn from your own usage: propose (and with --apply make) small re-orderings of routing.yaml cells
   usage       [--since 24h|7d|all] [--by model|mode|task]
 
 Profile "auto" builds the routing from the plans you have (--families, or detected). Fixed profiles:
@@ -1303,6 +1301,7 @@ async function main() {
     case "smoke": return smoke();
     case "logs": return logs(flags);
     case "usage": return usage(flags);
+    case "tune": return tune(flags);
     default: console.log(HELP); process.exitCode = cmd ? 1 : 0;
   }
 }
