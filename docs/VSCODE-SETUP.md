@@ -70,3 +70,6 @@ Merges into your `settings.json` (a backup `settings.json.bak-auto-router` is ma
 - `chat.tools.edits.autoApprove`: edits to `**/.env`, `**/.env.*`, `**/*.pem`, `**/*.key`, `**/.vscode/*.json` and `**/secrets/**` need your approval (`false`). Your own values for those patterns are never overridden.
 - `chat.agent.sandbox.enabled: true` (terminal sandbox; macOS, Linux, WSL2 only — skipped on Windows). The documentation also mentions `chat.tools.terminal.sandbox.enabled`; VS Code 1.142 does not contain that name (checked 2026-10-25), so it is not written.
 It never turns on global auto-approve, Autopilot or bypass. `chat.agent.networkFilter` can be managed only by an organisation and is not written. A `settings.json` with comments is not edited by the script (it would lose them): add the keys by hand.
+
+## Status bar (companion extension 0.3.0)
+`🔒 ` before the model name means safety mode is on; `· 🔒 sensível` at the end means the current conversation holds sensitive data and only allowed models are being used. The extension also tells the bridge which folder this window works in (`~/.auto-router/active-workspace.json`, valid 6 h). After `node ar.mjs update` run `node ar.mjs vscode` and **Developer: Reload Window** to get the new extension.

@@ -52,23 +52,14 @@ Then ask all remaining questions in ONE message and wait:
 4. **Which free accounts will they create?** Groq, OpenRouter, Mistral, Ollama Cloud, NVIDIA (all optional; more = more resilient). Each takes ~2 minutes at the links printed by `init`.
 5. **Is it OK that Balanced/Smart can spend their money / Claude allowance?** (Auto: Free never does.)
 
-Pick the routing. Easiest: **`--profile auto --families <list>`** builds it from what the user has — families are `claude`, `openai`, `copilot`, `gemini` (billed key), e.g. `--families claude,copilot,gemini`; without `--families` it uses `node ar.mjs detect`. Fixed profiles also exist:
-| Situation | `--profile` |
-|---|---|
-| Claude **and** a billed Gemini key | `A` |
-| Billed Gemini key, no Claude/OpenAI | `B` |
-| Claude, no billed Gemini | `C` |
-| Only free providers | `D` |
-| OpenAI (ChatGPT login or API) **and** a billed Gemini key | `E` |
-| OpenAI, no billed Gemini | `F` |
-(Mixing Claude and OpenAI: pick `A` or `E`, then edit `litellm/routing.yaml` — each tier is one line; `!gpt`, `!opus` … pins work for whatever is configured.)
+The routing is one table for everybody (`litellm/routing.yaml`, v3): a model the user cannot use (no key, not configured, not allowed by safety mode) is skipped automatically, so there is no profile to pick. The answers above only decide what to configure (keys, `--claude`, `--openai`, `--safety`) and the classifier model.
 
 ## Step 3 — Create the configuration
 ```sh
-node ar.mjs init --safety <on|off> --roots "<folder(s) from question 1>" --profile auto --families <claude,openai,copilot,gemini subset> --claude <cli|api|none> --openai <cli|api|none>
-# or a fixed profile:  --profile <A|B|C|D|E|F>
+node ar.mjs init --safety <on|off> --roots "<folder(s) from question 1>" --claude <cli|api|none> --openai <cli|api|none>
+# no billed Gemini key? add --profile auto --families <what they have, without gemini> — the classifier then runs on the free pool instead of Gemini
 ```
-This creates `.env` (secrets generated for the user), activates the routing profile, and remembers the folder for the VS Code extension.
+This creates `.env` (secrets generated for the user) and remembers the folder for the VS Code extension.
 Then walk the user through **`docs/GET-KEYS.md`** — it has numbered steps and links for every key (Claude, OpenAI/Codex, Gemini free and paid, Groq, OpenRouter, Mistral, Ollama Cloud, NVIDIA, Cloudflare, LLM7). Do one provider at a time, in their language; ask them to paste **only the keys they have** into `.env` and **save the file**. Check them all against the real providers:
 ```sh
 node ar.mjs keys --check

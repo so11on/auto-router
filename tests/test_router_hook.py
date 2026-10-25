@@ -17,8 +17,11 @@ for _k in ("GEMINI_API_KEY", "GEMINI_FREE_API_KEY", "ANTHROPIC_API_KEY", "OPENAI
 os.environ["SAFETY_MODE"] = "off"  # legacy routing tests; safety-on behaviour lives in test_hook_safety.py
 os.environ["SENSITIVE_GUARD"] = "off"
 os.environ["SENSITIVE_MASK_SECRETS"] = "off"
-os.environ["EVENT_LOG"] = os.path.join(ROOT, "data", "test-router.jsonl")
-os.environ["USAGE_FILE"] = os.path.join(ROOT, "data", "test-usage.jsonl")
+import tempfile as _t0  # noqa: E402
+
+_work = _t0.mkdtemp()  # never the real data/ of a running install: it holds live quota state and cooldowns
+os.environ["EVENT_LOG"] = os.path.join(_work, "test-router.jsonl")
+os.environ["USAGE_FILE"] = os.path.join(_work, "test-usage.jsonl")
 
 # stub the two litellm modules the hook imports
 litellm = types.ModuleType("litellm")

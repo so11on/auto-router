@@ -1,8 +1,8 @@
 # auto-router
 
-> Local LiteLLM gateway exposing auto-free / auto-balanced / auto-smart. A pre-call hook classifies each request
-> (task, complexity) and routes to Gemini, free OmniRoute combos (Groq, OpenRouter, Mistral) or Claude (Claude Code
-> CLI bridge or Anthropic API), setting reasoning effort and falling back on failure.
+> Local LiteLLM gateway exposing auto-free / auto-balanced / auto-smart. A pre-call hook masks secrets and personal data (DLP),
+> classifies each request (task, complexity) and a routing engine picks the model from per-profile tables (Gemini, the safety-filtered free
+> OmniRoute pool, Claude / ChatGPT / Copilot via CLI bridge or API), setting reasoning effort and falling back on failure.
 
 ## Start here
 - [AGENTS.md](AGENTS.md): map, commands, invariants, gotchas for AI assistants
@@ -14,7 +14,7 @@
 
 ## Docs
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): components, request flow, state, failure behaviour
-- [docs/ROUTING.md](docs/ROUTING.md): classification, tier table, stickiness, effort mapping
+- [docs/ROUTING.md](docs/ROUTING.md): profiles, task types, tables, engine filters, mid-task behaviour, pins, effort, learning
 - [docs/GET-KEYS.md](docs/GET-KEYS.md): step-by-step links and instructions for every key and subscription login
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md): env vars and config files
 - [docs/CLAUDE-BRIDGE.md](docs/CLAUDE-BRIDGE.md): Claude Code bridge, workspace detection, smooth model switching
@@ -23,14 +23,17 @@
 - [`ar.mjs logs`](`ar.mjs logs`): readable operation log (route, call, failover events)
 - [`ar.mjs usage`](`ar.mjs usage`): on-demand token/usage report (reads data/usage.jsonl)
 - [docs/TESTING.md](docs/TESTING.md): unit, smoke, probe tests
-- [docs/SECURITY.md](docs/SECURITY.md): secrets, exposure, permissions, terms of service
+- [docs/SECURITY.md](docs/SECURITY.md): safety mode, privacy classes, DLP and its limits, secrets, exposure, permissions, terms of service
+- [docs/SECURITY-CHANGES.md](docs/SECURITY-CHANGES.md): what the 0.4.0 hardening changed, what was verified, what is pending, manual steps
+- [docs/OMNIROUTE-CONTRACT.md](docs/OMNIROUTE-CONTRACT.md): the only OmniRoute surface the project uses, circuit breaker, safe upgrade
 - [docs/DECISIONS.md](docs/DECISIONS.md): rationale and open items
 - [docs/VSCODE-SETUP.md](docs/VSCODE-SETUP.md): Copilot Chat wiring (working; key via requestHeaders)
 
 ## Code
-- [litellm/routing.yaml](litellm/routing.yaml): mode → tiers table
+- [litellm/routing.yaml](litellm/routing.yaml): routing v3 tables (profile → task → band → candidates), aliases, pins
+- [litellm/models.yaml](litellm/models.yaml): per-model privacy class, price, fit, limits
 - [litellm/config.yaml](litellm/config.yaml): models, fallbacks, timeouts
-- [litellm/router_hook.py](litellm/router_hook.py): classifier and model selection hook
+- [litellm/router_hook.py](litellm/router_hook.py): DLP, classification, calling the engine; [engine.py](litellm/engine.py), [dlp.py](litellm/dlp.py), [safety.py](litellm/safety.py), [pool.py](litellm/pool.py)
 - [claude-bridge/server.mjs](claude-bridge/server.mjs): OpenAI-compatible facade over `claude -p`
 - [tests/test_router_hook.py](tests/test_router_hook.py): offline unit tests
 - [ar.mjs](ar.mjs): installer and control script (doctor, init, up, omniroute, vscode, smoke, logs, usage)

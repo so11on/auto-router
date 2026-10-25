@@ -100,6 +100,9 @@ class Tracker:
     @staticmethod
     def _cooldown_from_error(text: str, now: float):
         t = text.lower()
+        # an account without credit / with a billing problem stays broken until a human fixes it: do not retry it every request
+        if any(w in t for w in ("credit balance is too low", "insufficient_quota", "insufficient credit", "billing", "payment required", "402")):
+            return now + 6 * 3600
         if "429" not in t and "rate limit" not in t and "quota" not in t and "daily" not in t:
             return None
         m = re.search(r"reset(?:s)? after (\d+)\s*s", t) or re.search(r"retry[- ]after[^0-9]{0,5}(\d+)", t)

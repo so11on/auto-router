@@ -328,3 +328,14 @@ Every final answer ends with a footer naming the model (`*auto-router · auto-fr
 
 ## Final report to give the person
 List: which profile was installed; models kept per mode; which providers are connected; what the tests showed (unit count, smoke result, failover test, errors seen in the log); what was **not** verified (editor wiring, any untested provider); what costs money (paid tiers in `balanced`/`smart`); where logs are; how to stop everything; the terms-of-service notes for the Claude CLI route and free tiers that log prompts.
+
+## Lessons from the security hardening (2026-10-25)
+| Symptom | Cause / fix |
+|---|---|
+| `doctor` warns the auto-router is inside the folder the agent may edit | `BRIDGE_ALLOWED_ROOTS` contains the install folder (your `.env` is then readable by the agent). Move the install outside the code folders and rerun `init --roots` with the code folder only. |
+| Auto: Free says it has no model with safety mode on | `data/pool-members.json` does not exist yet: run `node ar.mjs omniroute`. |
+| After stopping OmniRoute the gateway is down too | The gateway depends on it in Compose: `docker compose up -d` brings both back (the upgrade commands do this). |
+| Claude Code ignores `Write(...)` deny rules | It only matches `Edit(...)` rules (they cover Write); the shipped settings use `Edit`. The `PreToolUse` hook is the second layer. |
+| Files written by the container are unreadable on Linux | `AR_UMASK=022` in `.env` (default 077 makes them private to the container's root). |
+| OmniRoute rejects an empty combo | A combo needs at least one model; it returns the new id at the top level. |
+| A paid API key without credit keeps being tried | Fixed: the router pauses a model for 6 h after "credit balance is too low". Remove `ANTHROPIC_API_KEY` or add credit. |

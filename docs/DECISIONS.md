@@ -90,7 +90,22 @@ Users have different setups (clone, ZIP) and edited files that must survive (`.e
 merges the three user-touched files with small text merges, backs up what it replaces, and is a dry run unless `--apply`. A clone is realigned with a printed `git fetch && git reset --mixed origin/main`.
 First-time bootstrap for copies that predate the command: fetch the new `ar.mjs` (UPDATE_WITH_AI.md Step 2). Trust model: whoever controls the repository can change the code that runs on the user's computer; hence the dry run, the file list, and `--repo/--ref/--from` to pin another source.
 
+## 2026-10-25 — Security hardening (0.4.0) and routing v3 (0.5.0)
+Two review plans were executed in order; the facts of what was and was not verified are in [SECURITY-CHANGES.md](SECURITY-CHANGES.md).
+- **Safety is data, not code.** Every model has a privacy class in `models.yaml` (`trusted`, `no_retention`, `restricted`, `unsafe`; pools take the worst verified member). `SAFETY_MODE=on` is the default because the free providers the project used first (Gemini free tier, LLM7, OpenRouter `:free`, NVIDIA trial, Mistral free) may log or train on prompts. The cost is a smaller, weaker free pool.
+- **DLP by regex and checksums, no Presidio.** The plan's default: no extra dependency or service; the limits are documented instead of hidden.
+- **The `.vsix` stays in the repository** (plan default) but is reproducible and checked against `SHA256SUMS`; the installer builds it from source.
+- **Updates follow release tags.** A moving branch can change the code that runs on the user's computer.
+- **Images pinned by digest; OmniRoute isolated by a contract** with a verifier, a circuit breaker and `omniroute-upgrade` with rollback. FreeLLMAPI stays rejected; OmniRoute is a run-time dependency behind the contract (SEC-16).
+- **One routing table for everybody.** The per-plan profiles A–F and the `auto` generator are gone: tables name all models, and the engine skips whatever the user cannot use (no key, not configured, not allowed by safety). `--profile` is still accepted by `init` and ignored.
+- **Estimates are marked.** The `fit` matrix, the CLI overhead (20 000 tokens), the DeepSeek off-peak window (16:30–00:30 UTC) and the Cloudflare / Ollama context windows are estimates until measured (`context_verified: false`, `fit_estimated`).
+- **Not implemented from the routing plan:** per-project `.auto-router/policy.yaml`; models without a key / verified id (DeepSeek, xAI Grok, Gemini 4 Argon, Llama 4 Maverick, Codestral) exist in `models.yaml` but not in `config.yaml`; `xhigh` effort is sent as `high`.
+- **A model that answers "credit balance too low" is paused for 6 h** instead of being retried on every request (found when the user's Anthropic API key had no credit and Haiku-by-API was the first choice of several cheap cells).
+
 ## Open items
+- Calibrate `fit` with real tasks (ROUTING.md, "Calibration") and measure the CLI overhead.
+- Confirm in real Copilot Chat that the start of the system prompt is stable across turns (conversation id, SEC-02).
+- Per-project privacy policy file; Windows / Linux runs of the security changes.
 - Check Agent-mode edits on each `Auto:` model in the editor.
 - Verify the Copilot CLI route with a real paid plan (flags, model ids, how limits are worded).
 - Verify the Codex route with a real `codex` install (event shapes, `-m`, `-c model_reasoning_effort`).

@@ -145,3 +145,6 @@ Traps we hit (do not repeat them):
 Not sure what you already have? `node ar.mjs detect` lists the logged-in tools and plans on this computer.
 
 After adding or changing keys: `node ar.mjs omniroute` (free pool), `node ar.mjs openai …` (OpenAI), then `node ar.mjs down && node ar.mjs up`.
+
+## Optional keys the router can use once you add the model (not wired by default)
+`models.yaml` already describes **DeepSeek** (`DEEPSEEK_API_KEY`, class `restricted`: servers in China, no zero-retention option — ordinary prompts only, never sensitive content), **xAI Grok** (`XAI_API_KEY`) and **Gemini 4 Argon**. They stay off until you (1) have the key in `.env`, (2) verify the model id with one real call, (3) add the `model_list` entry to `litellm/config.yaml` and the variable to the gateway's `environment:` list in `docker-compose.yml`. Steps: [ROUTING.md](ROUTING.md#adding-a-model). Never add an id you have not called.

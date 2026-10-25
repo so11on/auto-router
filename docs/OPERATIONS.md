@@ -18,6 +18,17 @@ The Docker services restart on their own (`restart: unless-stopped`).
 | `litellm/config.yaml`, `litellm/router_hook.py`, `.env` (LiteLLM vars) | `docker compose up -d --force-recreate litellm` |
 | `claude-bridge/server.mjs`, bridge vars in `.env` | `node ar.mjs down && node ar.mjs up` (or kill the pid in `data/bridge.pid` and run `node ar.mjs up`) |
 
+## Safety mode and the free pool
+```sh
+node ar.mjs safety status|on|off   # SAFETY_MODE; recreates the gateway
+node ar.mjs omniroute              # connect providers, probe every model, write data/pool-members.json (needed once; Auto: Free is blocked under safety mode until then)
+node ar.mjs omniroute --check      # does the running OmniRoute still honour the contract? (docs/OMNIROUTE-CONTRACT.md)
+node ar.mjs omniroute-upgrade --to <tag> [--dry-run]   # test a new OmniRoute on a spare port; switch only if it passes; --rollback undoes
+node ar.mjs doctor                 # ports on loopback, file modes, repo outside the code folders, the pinned images are the ones running
+node ar.mjs tune [--apply]         # learn from your usage: small re-orderings of routing.yaml cells
+```
+`data/spend.json` holds today's estimated spend of billed API calls (the daily caps of `routing.yaml` read it).
+
 ## Switch Claude route
 `CLAUDE_PRIMARY=cli` (Claude Code subscription) or `api` (Anthropic API key, needs credits) in `.env`, then recreate
 LiteLLM. Each route is the other's fallback in `config.yaml`.
@@ -43,7 +54,11 @@ The OmniRoute API key for LiteLLM can be recreated with `POST /api/keys {"name":
 | `auto-free` answers take ~20 s | Falling back to the Gemini free tier, which is slow. Check the pool: `FREE_POOL_ENABLED=true`, provider connections active, combos exist. |
 | `auto-free` returns 429 from Gemini | Free-tier per-minute quota used up; wait a minute. The pool should normally absorb this. |
 | Requests hang for minutes | An OmniRoute call with no usable provider (empty pool). Pool entries have a 15 s timeout, so the fallback should engage; if not, check `docker compose logs omniroute`. |
-| `auto-smart` shows `credit balance is too low` | The API route was used. Set `CLAUDE_PRIMARY=cli` and keep the bridge running. |
+| `auto-smart` / `auto-balanced` show `credit balance is too low` | An Anthropic API model (Haiku `hk` is first in several cheap cells) was tried with an account without credit. The router now pauses that model for 6 h after the first such error and the next candidate answers; add credit, or remove `hk` from the cells. |
+| `Nenhum modelo disponível… modo de segurança` in Auto: Free | The pool was never verified: `node ar.mjs omniroute`, then `docker compose up -d --force-recreate litellm`. |
+| `O pool gratuito está indisponível` | The circuit breaker opened (3 failures in 60 s): wait ~5 min or run `node ar.mjs omniroute --check`. |
+| `Conteúdo sensível detectado` | The request holds a secret / personal data and no allowed model exists in that profile (Auto: Free). Use Balanced/Smart, remove the data, or allow `no_retention` models with `SENSITIVE_ALLOWED_CLASSES=trusted,no_retention`. |
+| `routing.yaml está no formato antigo` | Run `node ar.mjs update --apply` (v2 tables are replaced by v3, your pins and settings are kept). |
 | HTTP 502/connection refused from `claude-*-cli` | Bridge not running (`node ar.mjs status`) or `BRIDGE_KEY` differs between `.env` and the running bridge. Restart it. |
 | Bridge 403 | Workspace outside `BRIDGE_ALLOWED_ROOTS`. |
 | Claude Code answers "can't find file" | Workspace not detected; the conversation lacks an absolute path. Send `x-workspace` or set `BRIDGE_DEFAULT_CWD`. |
@@ -83,8 +98,8 @@ Every final answer ends with `*auto-router · auto-free → free-pool-fast · gr
 provider/model · task, complexity, effort · time). Tool-call steps of an Agent run get no footer. Disable with `AUTO_ROUTER_FOOTER=false`.
 
 ## Updating
-`node ar.mjs update` (dry run) → `node ar.mjs update --apply --restart`. It downloads the repository archive (`--repo owner/name`, `--ref branch`, or `--from <folder>` for an unpacked copy),
-compares file by file, replaces code and docs, **merges** `litellm/routing.yaml` (keeps your tiers; adds new pins and sections) and `litellm/config.yaml` (keeps the managed OpenAI/Copilot blocks),
+`node ar.mjs update` (dry run) → `node ar.mjs update --apply --restart`. It downloads the **latest release tag** of the repository (`--repo owner/name`, `--ref vX.Y.Z`, or `--from <folder>` for an unpacked copy; a branch needs `--yes`),
+compares file by file, replaces code and docs, **merges** `litellm/routing.yaml` (v3: keeps your tables and settings, adds new sections, aliases and pins; a v2 file is replaced by the v3 tables, keeping your pins/switching/context), `litellm/config.yaml` (keeps the managed OpenAI/Copilot blocks) and `docker-compose.yml` (keeps the pinned image lines),
 appends new `.env` settings with their defaults, and never touches `.env` values or `data/`. Replaced files go to `data/update-backup-<time>/`. Runbook for an AI: UPDATE_WITH_AI.md.
 
 ## Operation log
@@ -96,7 +111,7 @@ node ar.mjs logs --rid ab12cd34        # one request end to end
 node ar.mjs logs --type stream_failover
 ```
 Each routed request gets a short `rid`; `route` shows the decision and why (`via=llm` classifier, `heuristic` fallback, `sticky`
-tool turn, `escalate-only`), `call` shows each upstream attempt (fallbacks appear as extra `call` rows), `stream_failover` shows a
+tool turn, `pinned`; plus `band`, `session`, `safety_mode`, `sensitive`, `est_cost`), `dlp` shows counts and kinds only (never values), `blocked` a refused request, `call` shows each upstream attempt (fallbacks appear as extra `call` rows), `stream_failover` shows a
 continuation. Fields are documented in the header of ``ar.mjs logs``.
 
 ## What happens when a model runs out mid-answer

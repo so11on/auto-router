@@ -39,24 +39,24 @@ model_list:
 
   # --- Gemini ---
   - model_name: gemini-flash-lite
-    litellm_params: {model: gemini/gemini-3.5-flash-lite, api_key: os.environ/GEMINI_API_KEY}
+    litellm_params: {model: gemini/gemini-3.5-flash-lite, api_key: os.environ/GEMINI_API_KEY, timeout: 120, stream_timeout: 60}
   - model_name: gemini-flash
-    litellm_params: {model: gemini/gemini-3.8-flash, api_key: os.environ/GEMINI_API_KEY}
+    litellm_params: {model: gemini/gemini-3.8-flash, api_key: os.environ/GEMINI_API_KEY, timeout: 120, stream_timeout: 60}
   - model_name: gemini-pro
-    litellm_params: {model: gemini/gemini-3.1-pro-preview, api_key: os.environ/GEMINI_API_KEY}
+    litellm_params: {model: gemini/gemini-3.1-pro-preview, api_key: os.environ/GEMINI_API_KEY, timeout: 120, stream_timeout: 60}
 
   # --- Gemini FREE tier (project WITHOUT billing): slow (~20 s) but stable; only the flash-lite model is kept ---
   - model_name: gemini-free-flash-lite
-    litellm_params: {model: gemini/gemini-3.5-flash-lite, api_key: os.environ/GEMINI_FREE_API_KEY}
+    litellm_params: {model: gemini/gemini-3.5-flash-lite, api_key: os.environ/GEMINI_FREE_API_KEY, timeout: 120, stream_timeout: 60}
 
   # --- Claude: "cli" = Claude Code via claude-bridge (your subscription), "api" = Anthropic API key ---
   # The hook picks the suffix from CLAUDE_PRIMARY (cli|api); fallbacks below cover the other route.
   - {model_name: claude-haiku-cli,  litellm_params: {model: openai/claude-code-haiku,  api_base: http://host.docker.internal:4100/v1, api_key: os.environ/BRIDGE_KEY}}
   - {model_name: claude-sonnet-cli, litellm_params: {model: openai/claude-code-sonnet, api_base: http://host.docker.internal:4100/v1, api_key: os.environ/BRIDGE_KEY}}
   - {model_name: claude-opus-cli,   litellm_params: {model: openai/claude-code-opus,   api_base: http://host.docker.internal:4100/v1, api_key: os.environ/BRIDGE_KEY}}
-  - {model_name: claude-haiku-api,  litellm_params: {model: anthropic/claude-haiku-5-5,  api_key: os.environ/ANTHROPIC_API_KEY}}
-  - {model_name: claude-sonnet-api, litellm_params: {model: anthropic/claude-sonnet-5-5, api_key: os.environ/ANTHROPIC_API_KEY}}
-  - {model_name: claude-opus-api,   litellm_params: {model: anthropic/claude-opus-5-5,   api_key: os.environ/ANTHROPIC_API_KEY}}
+  - {model_name: claude-haiku-api,  litellm_params: {model: anthropic/claude-haiku-5-5,  api_key: os.environ/ANTHROPIC_API_KEY, timeout: 120, stream_timeout: 60}}
+  - {model_name: claude-sonnet-api, litellm_params: {model: anthropic/claude-sonnet-5-5, api_key: os.environ/ANTHROPIC_API_KEY, timeout: 120, stream_timeout: 60}}
+  - {model_name: claude-opus-api,   litellm_params: {model: anthropic/claude-opus-5-5,   api_key: os.environ/ANTHROPIC_API_KEY, timeout: 120, stream_timeout: 60}}
 
   # --- test fixture for the mid-stream failover test (scripts/flaky_server.py) ---
   - {model_name: test-flaky, litellm_params: {model: openai/flaky, api_base: 'http://host.docker.internal:4199/v1', api_key: x}}

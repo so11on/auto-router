@@ -56,6 +56,18 @@ per day (about 50 requests/day without a deposit); Groq limits are per model and
 rate limited. OpenRouter free models can disappear without notice (`nemotron-3-super` already returned 404).
 Verify current numbers in each provider's console.
 
+## Free pool with safety mode on (verified 2026-10-25)
+`node ar.mjs omniroute` with `SAFETY_MODE=on` contacts only providers whose models are not `unsafe` and wrote 16 members to `data/pool-members.json`, all `no_retention`. Each id below was probed with a real request through OmniRoute; they are also available individually (routing v3 `pool-*` models).
+
+| Pool model | Provider | Class | Notes |
+|---|---|---|---|
+| `pool-gpt-oss-120b` | Groq | no_retention | 30 req/min, 1 000/day, **8 K tokens/min**, 200 K tokens/day (Groq listed). Enable Zero Data Retention in the Groq console. |
+| `pool-qwen` (Qwen3.8-27B) | Groq | no_retention | |
+| `pool-cf-llama`, `pool-cf-coder`, `pool-cf-glm` | Cloudflare Workers AI | no_retention | shared 10 K neurons/day; context windows are estimates (24–32 K) |
+| `pool-gemma` (Gemma4 31B), `pool-nemotron-super` | Ollama Cloud | no_retention | small free plan; context estimated 64 K |
+| `pool-deepseek` (LLM7), `pool-nemotron-ultra` (NVIDIA trial) | | **unsafe** | only with `SAFETY_MODE=off` |
+Not contacted under safety mode: Mistral, OpenRouter `:free`, NVIDIA, LLM7 (their free models may log or train on prompts) and the free Gemini key.
+
 ## Not connected
 - **Cloudflare Workers AI** — **working since 2026-10-24** (see below). Earlier problem: account id and token saved, but every call to `/accounts/<id>/ai/...` returned 401 "Authentication error" and `/accounts/<id>` returned 9109 "Unauthorized". The token verifies as a user token. Fix in the dashboard: token must list this account under *Account Resources* and have *Workers AI* permission (template "Workers AI"), and the id must be the account id from the dashboard URL. Not tested beyond that.
 - **OmniRoute keyless providers** (Pollinations, OpenCode Zen, Kilo): all required a real key at test time and were removed.

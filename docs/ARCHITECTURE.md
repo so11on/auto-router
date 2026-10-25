@@ -9,25 +9,27 @@ model: the gateway decides per request from the task and the mode, like Cursor's
 | Component | Runs | Port | Role |
 |---|---|---|---|
 | LiteLLM proxy | Docker | 4000 | Public endpoint (OpenAI Chat, OpenAI Responses, Anthropic Messages). Holds the model list, fallbacks and timeouts. |
-| `router_hook.py` | inside LiteLLM | - | `async_pre_call_hook`: classifies the request and rewrites `model` and the effort parameter before LiteLLM routes. |
-| OmniRoute | Docker | 127.0.0.1:20128 | Aggregates free provider accounts behind one OpenAI endpoint. Holds the `free-fast` and `free-coding` combos over Groq, OpenRouter `:free` and Mistral Codestral. |
+| `router_hook.py` | inside LiteLLM | - | `async_pre_call_hook`: runs the DLP, classifies the request, asks the engine for the model and rewrites `model`, the effort and the per-request `fallbacks` before LiteLLM routes. |
+| `dlp.py`, `safety.py` | inside LiteLLM | - | Secret / personal-data / image detection and masking; privacy classes and the `SAFETY_MODE` / sensitive-content rules. |
+| `engine.py` | inside LiteLLM | - | `route()`: tables → filters → reorder → floor / cost → fallbacks. Pure Python, unit-tested. See [ROUTING.md](ROUTING.md). |
+| `pool.py` | inside LiteLLM | - | Circuit breaker for the free pool (OmniRoute). |
+| OmniRoute | Docker | 127.0.0.1:20128 | Third-party dependency isolated by a [contract](OMNIROUTE-CONTRACT.md). Aggregates free provider accounts behind one OpenAI endpoint: the `free-fast` / `free-coding` combos and the individual pool models. |
 | claude-bridge | host (Node) | 127.0.0.1:4100 | OpenAI-compatible facade over `claude -p`, so Claude is used through the Claude Code login. |
-| Classifier | Gemini API | - | `gemini-3.5-flash-lite` returns `{task, complexity}` as JSON. Falls back to a keyword heuristic on error. |
+| Classifier | `CLASSIFIER_MODEL` (paid Gemini by default; the pool in `auto-free`) | - | Returns `{task, complexity, risk, long_output}` as JSON. Falls back to a local keyword heuristic on error or when no allowed model may see the text. |
 
 ## Request flow
 
 1. Client calls `POST :4000/v1/chat/completions` (or `/v1/responses`, `/v1/messages`) with `model=auto-*`.
 2. `router_hook.py`:
-   - reads the mode from the model name (`free | balanced | smart`);
-   - derives a conversation key (hash of mode + first user message);
-   - if the newest message is a user turn: classifies it (task + complexity 1-5, +1 above 60k tokens);
-   - if it is a tool-result turn: reuses the conversation's previous decision;
-   - applies `task_bump`, looks up the first tier with `complexity <= max_complexity` in `routing.yaml`;
-   - keeps the old decision if the new one is lower (a conversation only escalates);
-   - resolves the Claude route (`-cli` or `-api`, from `CLAUDE_PRIMARY`) and the free pool switch (`FREE_POOL_ENABLED`);
-   - sets the effort (`reasoning_effort`, `reasoning.effort` for Responses, `thinking` for Anthropic API models);
-   - prepends a handoff note when the serving model differs from the previous turn.
-3. LiteLLM calls the chosen deployment. On error or timeout it walks `router_settings.fallbacks`.
+   - reads the profile from the model name (`free | balanced | smart`);
+   - derives a conversation key (hash of profile + system prompt + first user message) from the ORIGINAL text;
+   - **DLP**: masks secrets (and personal data if asked) in `messages`, `input`, `instructions`…, flags the request sensitive (sticky per conversation);
+   - a pin is validated against safety and availability, or ignored with a note;
+   - a new user turn is classified (task, complexity, risk); a tool-result turn re-runs the engine with the stored classification, re-classifying at checkpoints or on failure signals (policy.py: escalate at once, descend with hysteresis);
+   - `engine.route()` returns the model, effort and fallbacks (see [ROUTING.md](ROUTING.md));
+   - resolves `claude-*` / `gpt-*` to `-cli` or `-api`, compacts the history if the chosen model's window would be exceeded, prepends a handoff note when the serving model changed;
+   - sets the effort (`reasoning_effort`, `reasoning.effort` for Responses, `thinking` for Anthropic API models) and `data["fallbacks"]`.
+3. LiteLLM calls the chosen deployment. On error or timeout it walks the per-request `fallbacks` (the static `router_settings.fallbacks` are the last resort).
 4. For `claude-*-cli` the call goes to claude-bridge, which runs `claude -p` in the project directory.
 
 ## Smooth model switching
@@ -41,7 +43,7 @@ would not know what others did. Both are closed:
 Details: [CLAUDE-BRIDGE.md](CLAUDE-BRIDGE.md).
 
 ## State
-- Hook: in-memory dicts (`_sticky`, `_last_model`), 1 h TTL; lost on LiteLLM restart (next turn reclassifies).
+- Hook: in-memory dicts (`_sticky`, `_last_model`), 1 h TTL; lost on LiteLLM restart (next turn reclassifies). On disk (`data/`, private): `router.jsonl`, `usage.jsonl`, `context-state.json`, `quota-state.json`, `quota-report.json`, `spend.json` (daily estimate), `pool-members.json` (verified pool models and their classes), `tune-state.json`.
 - Bridge: `~/.auto-router/bridge-state.json` (conversation → Claude Code session id, cwd, messages seen, last end time).
 - OmniRoute: Docker volume `omniroute-data` (provider keys, dashboard password, API keys).
 
@@ -49,7 +51,8 @@ Details: [CLAUDE-BRIDGE.md](CLAUDE-BRIDGE.md).
 - Provider 429/5xx/timeout → next deployment in `fallbacks`; the cooldown is 300 s after 1 failure.
 - Classifier failure → heuristic classification (length + keywords).
 - Claude subscription limit → bridge answers HTTP 429 → LiteLLM falls to the API route, then Gemini.
-- `auto-free` never falls back to paid models; when the free tier is exhausted it errors.
+- `auto-free` never falls back to paid models; when the free pool is down (circuit breaker) or nothing allowed is left it answers with a clear message.
+- A fallback never reintroduces a model the request may not use: the chain is computed per request after the safety and sensitivity filters.
 
 ## Failover while an answer is being written
 Two layers, because LiteLLM only falls back **before the first token**:

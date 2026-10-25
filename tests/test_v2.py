@@ -172,3 +172,13 @@ class Context(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BillingErrors(unittest.TestCase):
+    def test_an_empty_account_is_not_retried_for_hours(self):
+        with tempfile.TemporaryDirectory() as d:
+            tr = Tracker(d, lambda m: {"quota": "counted", "limits": {}})
+            tr.record_call("claude-haiku-api", 0, False, "AnthropicException - Your credit balance is too low to access the Anthropic API", now=1000.0)
+            st = tr.status("claude-haiku-api", now=1100.0)
+            self.assertEqual(st["state"], "exhausted")
+            self.assertEqual(tr.status("claude-haiku-api", now=1000.0 + 7 * 3600)["state"], "unknown")
