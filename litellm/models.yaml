@@ -7,6 +7,13 @@
 #            counted              -> our own counters against `limits` below
 #            none                 -> billed per token, no hard quota we can see
 # limits:  only numbers we measured or that the provider publishes; "source" says which. Missing = unknown.
+# privacy: privacy class used by SAFETY_MODE / SENSITIVE_GUARD (see litellm/safety.py and docs/SECURITY.md):
+#            trusted       paid, terms say prompts are not used for training          -> may receive sensitive content
+#            no_retention  declares no training and no retention (free or paid)       -> sensitive content only if allowed in SENSITIVE_ALLOWED_CLASSES
+#            restricted    stable provider but jurisdiction/retention not acceptable  -> ordinary prompts only, NEVER sensitive content
+#            unsafe        may log/train/human-review, unknown policy, random host    -> removed from every route when SAFETY_MODE=on
+#            pool          computed at run time: the worst class among the verified OmniRoute pool members (data/pool-members.json)
+#          A model without `privacy` is treated as unsafe.
 # Verified 2026-10-24: Gemini and Claude windows from LiteLLM model info and Claude Code `modelUsage.contextWindow`;
 # pool windows from OmniRoute /v1/models per member model.
 
@@ -17,38 +24,38 @@ defaults:
 
 models:
   # --- free pool (OmniRoute) ---
-  free-pool-fast:      {context: 128000, quota: counted, limits: {rpm: 30, source: "Groq listed 30 rpm for gpt-oss-20b (first member)"}}
-  free-pool-coding:    {context: 128000, quota: counted, limits: {rpm: 30, source: "Groq listed 30 rpm for gpt-oss-120b (first member)"}}
-  free-pool:           {context: 128000, quota: counted}
-  pool-deepseek:       {context: 64000,  quota: counted, limits: {tpd: 100000, rpm: 60, source: "LLM7 listed: 100K tokens/day, 60 rpm; context unknown, conservative"}}
-  pool-gpt-oss-120b:   {context: 128000, quota: counted, limits: {rpm: 30, rpd: 1000, source: "Groq listed"}}
-  pool-nemotron-ultra: {context: 128000, quota: counted, limits: {rpm: 40, rpd: 10000, source: "NVIDIA NIM listed"}}
+  free-pool-fast:      {privacy: pool, context: 128000, quota: counted, limits: {rpm: 30, source: "Groq listed 30 rpm for gpt-oss-20b (first member)"}}
+  free-pool-coding:    {privacy: pool, context: 128000, quota: counted, limits: {rpm: 30, source: "Groq listed 30 rpm for gpt-oss-120b (first member)"}}
+  free-pool:           {privacy: pool, context: 128000, quota: counted}
+  pool-deepseek:       {privacy: unsafe, context: 64000,  quota: counted, limits: {tpd: 100000, rpm: 60, source: "LLM7 listed: 100K tokens/day, 60 rpm; context unknown, conservative"}}
+  pool-gpt-oss-120b:   {privacy: no_retention, context: 128000, quota: counted, limits: {rpm: 30, rpd: 1000, source: "Groq listed"}}
+  pool-nemotron-ultra: {privacy: unsafe, context: 128000, quota: counted, limits: {rpm: 40, rpd: 10000, source: "NVIDIA NIM listed"}}
 
   # --- Gemini ---
-  gemini-free-flash-lite: {context: 1048576, quota: counted, limits: {rpm: 15, source: "measured 2026-10-20 (429 body)"}}
-  gemini-flash-lite:      {context: 1048576, paid: true, quota: none}
-  gemini-flash:           {context: 1048576, paid: true, quota: none}
-  gemini-pro:             {context: 1048576, paid: true, quota: none}
+  gemini-free-flash-lite: {privacy: unsafe, context: 1048576, quota: counted, limits: {rpm: 15, source: "measured 2026-10-20 (429 body)"}}
+  gemini-flash-lite:      {privacy: trusted, context: 1048576, paid: true, quota: none}
+  gemini-flash:           {privacy: trusted, context: 1048576, paid: true, quota: none}
+  gemini-pro:             {privacy: trusted, context: 1048576, paid: true, quota: none}
 
   # --- Claude: CLI bridge (subscription) and API ---
-  claude-haiku-cli:  {context: 1000000, quota: claude-subscription}
-  claude-sonnet-cli: {context: 1000000, quota: claude-subscription}
-  claude-opus-cli:   {context: 1000000, quota: claude-subscription}
-  claude-haiku-api:  {context: 1000000, paid: true, quota: none}
-  claude-sonnet-api: {context: 1000000, paid: true, quota: none}
-  claude-opus-api:   {context: 1000000, paid: true, quota: none}
+  claude-haiku-cli:  {privacy: trusted, context: 1000000, quota: claude-subscription}
+  claude-sonnet-cli: {privacy: trusted, context: 1000000, quota: claude-subscription}
+  claude-opus-cli:   {privacy: trusted, context: 1000000, quota: claude-subscription}
+  claude-haiku-api:  {privacy: trusted, context: 1000000, paid: true, quota: none}
+  claude-sonnet-api: {privacy: trusted, context: 1000000, paid: true, quota: none}
+  claude-opus-api:   {privacy: trusted, context: 1000000, paid: true, quota: none}
 
   # --- OpenAI: windows are conservative defaults; `node ar.mjs openai` can override them ---
-  gpt-mini-cli: {context: 128000, quota: none}
-  gpt-main-cli: {context: 128000, quota: none}
-  gpt-max-cli:  {context: 128000, quota: none}
-  gpt-mini-api: {context: 128000, paid: true, quota: none}
-  gpt-main-api: {context: 128000, paid: true, quota: none}
-  gpt-max-api:  {context: 128000, paid: true, quota: none}
+  gpt-mini-cli: {privacy: trusted, context: 128000, quota: none}
+  gpt-main-cli: {privacy: trusted, context: 128000, quota: none}
+  gpt-max-cli:  {privacy: trusted, context: 128000, quota: none}
+  gpt-mini-api: {privacy: trusted, context: 128000, paid: true, quota: none}
+  gpt-main-api: {privacy: trusted, context: 128000, paid: true, quota: none}
+  gpt-max-api:  {privacy: trusted, context: 128000, paid: true, quota: none}
 
   # --- GitHub Copilot paid plan (Copilot CLI); premium-request allowance is not visible to us ---
-  copilot-mini: {context: 128000, quota: none}
-  copilot-main: {context: 128000, quota: none}
-  copilot-max:  {context: 128000, quota: none}
+  copilot-mini: {privacy: trusted, context: 128000, quota: none}
+  copilot-main: {privacy: trusted, context: 128000, quota: none}
+  copilot-max:  {privacy: trusted, context: 128000, quota: none}
 
-  test-flaky: {context: 32000, quota: none}
+  test-flaky: {privacy: unsafe, context: 32000, quota: none}

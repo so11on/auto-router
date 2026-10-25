@@ -21,6 +21,7 @@ def _load() -> dict:
 
 
 def spec(model_name: str) -> dict:
+    """Facts for one model_name. `privacy` is NOT defaulted here: safety.privacy_of() treats a missing class as unsafe."""
     data = _load()
     base = dict(data.get("defaults") or {})
     base.update((data.get("models") or {}).get(model_name) or {})

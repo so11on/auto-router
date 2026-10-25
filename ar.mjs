@@ -6,6 +6,7 @@
 //   node ar.mjs keys [--check]          which keys are set (names only); --check also asks each provider whether the key works
 //   node ar.mjs cloudflare-token       mint a Workers-AI-only token from a token that can only create tokens (see docs/GET-KEYS.md)
 //   node ar.mjs update [--apply]       update THIS install from the repository (dry run first); keeps your keys and choices
+//   node ar.mjs safety [on|off|status] safety mode: on removes models that may log/train on prompts (default), off allows them
 //   node ar.mjs detect [--json]        which paid plans / logins this computer has (Claude, ChatGPT, GitHub Copilot, keys)
 //   node ar.mjs copilot [options]       configure your paid GitHub Copilot plan as router targets (Copilot CLI)
 //   node ar.mjs openai [options]        configure OpenAI: Codex CLI with your ChatGPT login and/or an OpenAI API key
@@ -166,6 +167,8 @@ function init(flags) {
   if (!fs.existsSync(pf)) { bad(`unknown profile ${profile} (use A-F or auto — see profiles/)`); process.exit(1); }
   const claude = String(flags.claude || "cli");
   if (!["cli", "api", "none"].includes(claude)) { bad("--claude must be cli, api or none"); process.exit(1); }
+  const safetyFlag = String(flags.safety || "on").toLowerCase();
+  if (!["on", "off"].includes(safetyFlag)) { bad("--safety must be on or off"); process.exit(1); }
   const openai = String(flags.openai || "cli");
   if (!["cli", "api", "none"].includes(openai)) { bad("--openai must be cli, api or none"); process.exit(1); }
   const rootsRaw = flags.roots || flags.root;
@@ -188,6 +191,7 @@ function init(flags) {
     t = setEnvText(t, "BRIDGE_ALLOWED_ROOTS", roots.join(","));
     t = setEnvText(t, "CLAUDE_PRIMARY", claude === "api" ? "api" : "cli");
     t = setEnvText(t, "OPENAI_PRIMARY", openai === "api" ? "api" : "cli");
+    t = setEnvText(t, "SAFETY_MODE", safetyFlag);
     if (["C", "D", "F"].includes(profile) || (auto && !String(flags.families ?? "").includes("gemini") && flags.families !== undefined)) t = setEnvText(t, "CLASSIFIER_MODEL", "pool");
     fs.writeFileSync(ENV_FILE, t, { mode: 0o600 });
     ok("created .env with generated secrets (permissions restricted)");
@@ -442,6 +446,24 @@ async function update(flags) {
   if (fs.existsSync(path.join(ROOT, ".git"))) info("This folder is a git clone: files were updated in place. Realign git with: git fetch && git reset --mixed origin/main");
 }
 
+// ---------------------------------------------------------------- safety
+async function safety(flags, rest) {
+  const e = readEnv();
+  if (!e) return bad("no .env — run: node ar.mjs init");
+  const arg = (rest[1] || "status").toLowerCase();
+  if (!["on", "off", "status"].includes(arg)) return bad("usage: node ar.mjs safety [on|off|status]");
+  if (arg !== "status") {
+    setEnv("SAFETY_MODE", arg);
+    ok(`SAFETY_MODE=${arg}`);
+    if (arg === "off") warn("models that may log, train on or let humans read your prompts are allowed again (free Gemini key, LLM7, OpenRouter :free, NVIDIA trial, Mistral free)");
+    const r = spawnSync("docker", ["compose", "up", "-d", "--force-recreate", "litellm"], { cwd: ROOT, stdio: "ignore" });
+    (r.status === 0 ? ok : warn)(r.status === 0 ? "gateway recreated with the new setting" : "could not recreate the gateway: run  docker compose up -d --force-recreate litellm");
+  }
+  const cur = readEnv();
+  console.log(`safety mode: ${cur.SAFETY_MODE || "on"}   sensitive guard: ${cur.SENSITIVE_GUARD || "on"}   allowed for sensitive content: ${cur.SENSITIVE_ALLOWED_CLASSES || "trusted"}   mask secrets: ${cur.SENSITIVE_MASK_SECRETS || "on"}   mask personal data: ${cur.SENSITIVE_MASK_PII || "off"}`);
+  if ((cur.SAFETY_MODE || "on") === "on" && cur.GEMINI_FREE_API_KEY) info("GEMINI_FREE_API_KEY is set but ignored while safety is on (free-tier Gemini may be read by humans and used to improve products). You can leave it empty.");
+}
+
 // ---------------------------------------------------------------- detect
 function tryJson(cmd, args) { const r = run(cmd, args); try { return r.status === 0 ? JSON.parse(r.stdout) : null; } catch { return null; } }
 export function detectPlans() {
@@ -655,6 +677,8 @@ async function up(flags) {
 }
 async function down() { compose(["down"]); bridgeDown(); }
 async function status() {
+  const env0 = readEnv() || {};
+  info(`safety: ${env0.SAFETY_MODE || "on"} · sensitive guard: ${env0.SENSITIVE_GUARD || "on"}`);
   const g = await http(`${GATEWAY}/health/liveliness`, { timeout: 3000 });
   (g.status === 200 ? ok : bad)(`gateway :4000 ${g.status === 200 ? "up" : "down"}`);
   (await portOpen(20128) ? ok : bad)("OmniRoute :20128 " + ((await portOpen(20128)) ? "up" : "down"));
@@ -930,10 +954,11 @@ function usage(flags) {
 const HELP = `auto-router — node ar.mjs <command>
 
   doctor      check Docker, Node, Claude CLI, VS Code, ports
-  init        --roots <folders> [--profile A-F|auto] [--families claude,openai,copilot,gemini] [--pool yes|no] [--claude cli|api|none] [--openai cli|api|none] [--force]
+  init        --roots <folders> [--safety on|off] [--profile A-F|auto] [--families claude,openai,copilot,gemini] [--pool yes|no] [--claude cli|api|none] [--openai cli|api|none] [--force]
   keys        [--check] show which keys are set; --check tests each one against its provider
   cloudflare-token   fix "Authentication error" when CLOUDFLARE_API_TOKEN is a 'create tokens' token (docs/GET-KEYS.md)
   update      [--apply] [--restart] [--repo owner/name] [--ref branch] [--from <folder>]   dry run by default; --apply changes files (backup kept)
+  safety      [on|off|status]   SAFETY_MODE (privacy classes) and the sensitive-data guard
   detect      [--json]  find out which paid plans/logins exist (never prints e-mails or keys)
   copilot     [--mini ID --main ID --max ID] [--check]   use your paid GitHub Copilot plan (Copilot CLI)
   openai      [--list] [--route cli|api|both] [--mini ID --main ID --max ID] [--check]   OpenAI via ChatGPT login (Codex CLI) and/or API key
@@ -957,6 +982,7 @@ async function main() {
     case "keys": return keys(flags);
     case "openai": return openai(flags);
     case "detect": return detect(flags);
+    case "safety": return safety(flags, rest);
     case "update": return update(flags);
     case "copilot": return copilot(flags);
     case "cloudflare-token": return cloudflareToken();
