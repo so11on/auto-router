@@ -58,6 +58,9 @@ services:
       - SENSITIVE_MASK_PII=${SENSITIVE_MASK_PII:-off}
       - SENSITIVE_IMAGES=${SENSITIVE_IMAGES:-trusted_only}
       - DLP_FAIL_MODE=${DLP_FAIL_MODE:-closed}
+      - POOL_FAIL_THRESHOLD=${POOL_FAIL_THRESHOLD:-3}
+      - POOL_FAIL_WINDOW_S=${POOL_FAIL_WINDOW_S:-60}
+      - POOL_COOLDOWN_S=${POOL_COOLDOWN_S:-300}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

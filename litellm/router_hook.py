@@ -29,6 +29,7 @@ from litellm.integrations.custom_logger import CustomLogger
 import context as ctxmod
 import dlp
 import policy
+import pool
 import registry
 import safety
 from quota import Tracker
@@ -499,6 +500,14 @@ def _configured(name: str) -> bool:
     return name in registry.names()
 
 
+_breaker = pool.Breaker()
+POOL_DOWN_MESSAGE = "O pool gratuito está indisponível. Tente de novo em alguns minutos ou use Auto: Balanced."
+
+
+def _pool_open(name: str) -> bool:
+    return pool.Breaker.covers(name) and _breaker.is_open()
+
+
 def _track_quota(kwargs: dict, response_obj, ok: bool) -> None:
     try:
         slo = kwargs.get("standard_logging_object") or {}
@@ -506,7 +515,10 @@ def _track_quota(kwargs: dict, response_obj, ok: bool) -> None:
         if meta.get("classifier"):
             return
         group = slo.get("model_group") or meta.get("model_group") or kwargs.get("model")
-        _quota.record_call(group, slo.get("total_tokens") or 0, ok, str(kwargs.get("exception") or slo.get("error_str") or ""))
+        err = str(kwargs.get("exception") or slo.get("error_str") or "")
+        _quota.record_call(group, slo.get("total_tokens") or 0, ok, err)
+        if pool.Breaker.covers(group):
+            _breaker.record(ok, err)
     except Exception:
         pass
 
@@ -515,6 +527,9 @@ def _write_quota_report() -> None:
     """Snapshot of every known model's quota state for `node ar.mjs usage` (cheap: in-memory counters)."""
     try:
         out = {m: _quota.status(m) for m in registry.names()}
+        for m in out:
+            if _pool_open(m):
+                out[m] = {**out[m], "state": "exhausted", "pool": _breaker.status()}
         tmp = os.path.join(DATA_DIR, "quota-report.json.tmp")
         with open(tmp, "w") as f:
             json.dump({"updated": time.time(), "models": out}, f, default=str)
@@ -773,7 +788,7 @@ class AutoRouter(CustomLogger):
         tokens = ctxmod.count_tokens(messages, data.get("tools"))
         client_tokens = tokens  # what the editor is holding; compaction below only shrinks what the model receives
         need = tokens + ccfg["output_reserve"]
-        health = lambda m: _quota.status(m)["state"]
+        health = lambda m: "exhausted" if _pool_open(m) else _quota.status(m)["state"]
         fits = lambda m: need <= registry.context_window(m) * ccfg["compact_at"]
         adj_reason = None
         if not decision.get("pinned"):
@@ -786,6 +801,15 @@ class AutoRouter(CustomLogger):
                 raise HTTPException(status_code=400, detail=_blocked_message(sensitive, dres.kinds, mode))
             if decision["model"] != before:
                 switched = True
+        if _pool_open(_resolve(decision["model"])):
+            # the pool is down: never wait for its timeout and never escape to a paid / unsafe model by accident
+            alt = next((n for n in FALLBACK_TAIL.get(mode, []) if _configured(n) and not _pool_open(n)
+                        and _model_allowed(n, s, sensitive, mode)), None)
+            if alt is None:
+                _event("blocked", rid=rid, mode=mode, sensitive=sensitive, kinds=dres.kinds, pool=_breaker.status())
+                raise HTTPException(status_code=503, detail=POOL_DOWN_MESSAGE)
+            decision = {**decision, "model": alt}
+            adj_reason, switched = "pool unhealthy", True
         model = _resolve(decision["model"])
         window = registry.context_window(model)
         compacted = False
@@ -817,7 +841,7 @@ class AutoRouter(CustomLogger):
         # per-request fallbacks: only models this request may reach (safety, sensitivity, profile), never the static list
         chain, seen = [], {model}
         for n in [_resolve(m) for m in policy.ladder(routing, mode)] + list(FALLBACK_TAIL.get(mode, [])):
-            if n not in seen and _configured(n) and _model_allowed(n, s, sensitive, mode):
+            if n not in seen and _configured(n) and not _pool_open(n) and _model_allowed(n, s, sensitive, mode):
                 seen.add(n)
                 chain.append(n)
         data["fallbacks"] = chain

@@ -4,7 +4,7 @@ Short ADR-style log. Date format: ISO.
 
 ## 2026-10-20 — LiteLLM as the gateway, custom hook as the brain
 Needed: three Cursor-style Auto modes that look at the task, set effort and fall back across providers.
-- FreeLLMAPI: free tiers only; routes by live model scores, not by prompt; Anthropic is an inbound API only. Rejected.
+- FreeLLMAPI: free tiers only; routes by live model scores, not by prompt; Anthropic is an inbound API only. Rejected. OmniRoute is a run-time dependency isolated by a contract ([OMNIROUTE-CONTRACT](OMNIROUTE-CONTRACT.md), SEC-16); FreeLLMAPI is not used.
 - OmniRoute alone: huge provider catalogue and tiers, but no per-prompt complexity routing found in its docs; modes would be
   fixed combos. Kept only as the free-provider pool.
 - OpenRouter Auto / RouteLLM / Arch-Router / vLLM semantic router: per-prompt routing exists but none gives three modes plus

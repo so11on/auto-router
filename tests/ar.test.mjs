@@ -6,7 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseEnv, setEnvText, patchProviders, buildProvider, vscodeUserDir, openaiBlocks, applyBlocks, buildRoutingText, familiesFrom, copilotBlocks, LADDER, planSync, applySync, mergeEnv, mergeRouting, mergeConfig, changelogSince } from "../ar.mjs";
+import { parseEnv, setEnvText, patchProviders, buildProvider, vscodeUserDir, openaiBlocks, applyBlocks, buildRoutingText, familiesFrom, copilotBlocks, LADDER, planSync, applySync, mergeEnv, mergeRouting, mergeConfig, mergeCompose, composeImage, setComposeImage, changelogSince } from "../ar.mjs";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -265,4 +265,27 @@ test("SEC-09: every pool candidate declares a privacy class and the providers ne
   }
   assert.ok(spec["free-fast"].some((m) => m.privacy !== "unsafe"), "with SAFETY_MODE=on the fast combo must still have members");
   assert.ok(spec["free-coding"].some((m) => m.privacy !== "unsafe"));
+});
+
+test("SEC-16: compose pins images by digest and `update` never changes which image runs", () => {
+  const compose = fs.readFileSync(path.join(ROOT, "docker-compose.yml"), "utf8");
+  assert.doesNotMatch(compose, /:latest|:main-stable(?!@)/);
+  for (const svc of ["omniroute", "litellm"]) assert.match(composeImage(compose, svc), /@sha256:[0-9a-f]{64}$/, svc);
+  const local = compose;
+  const upstream = compose.replace(/(omniroute:)\S+/, "$1999.0.0@sha256:" + "a".repeat(64)).replace("restart: unless-stopped", "restart: always");
+  const merged = mergeCompose(local, upstream);
+  assert.equal(composeImage(merged, "omniroute"), composeImage(local, "omniroute"), "the pinned image survives");
+  assert.match(merged, /restart: always/, "other upstream changes are taken");
+  // an old install with a floating tag gets upstream's pinned line
+  const old = local.replace(/image: diegosouzapw\S+/, "image: diegosouzapw/omniroute:latest");
+  assert.equal(composeImage(mergeCompose(old, local), "omniroute"), composeImage(local, "omniroute"));
+  assert.match(setComposeImage(local, "omniroute", "x/y:1@sha256:" + "b".repeat(64)), /image: x\/y:1@sha256:b{64}/);
+  assert.equal(composeImage(setComposeImage(local, "omniroute", "x/y:1"), "litellm"), composeImage(local, "litellm"));
+});
+
+test("SEC-16: omniroute-upgrade to a tag that does not exist changes nothing", { skip: spawnSync("docker", ["info"]).status !== 0 && "docker not available" }, () => {
+  const before = fs.readFileSync(path.join(ROOT, "docker-compose.yml"), "utf8");
+  const r = spawnSync(process.execPath, [path.join(ROOT, "ar.mjs"), "omniroute-upgrade", "--to", "zzz-does-not-exist-0"], { encoding: "utf8", timeout: 120000 });
+  assert.match(r.stdout + r.stderr, /could not pull/);
+  assert.equal(fs.readFileSync(path.join(ROOT, "docker-compose.yml"), "utf8"), before);
 });

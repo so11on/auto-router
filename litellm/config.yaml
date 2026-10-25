@@ -1,7 +1,7 @@
 # Real models, all verified against the providers (see docs/FREE-TIER-LIMITS.md).
 # Pool entries have a 15 s timeout: an empty OmniRoute pool hangs for minutes, and the fallback must kick in fast.
 model_list:
-  # --- free pool (OmniRoute / FreeLLMAPI, OpenAI-compatible) ---
+  # --- free pool (OmniRoute, OpenAI-compatible) ---
   - model_name: free-pool
     litellm_params:
       model: openai/free-coding

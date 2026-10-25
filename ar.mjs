@@ -169,6 +169,19 @@ async function doctor() {
   };
   for (const r of rootsNow) if (!inside(ROOT, r)) walk(r, 0);
   if (envFiles) warn(`${envFiles} .env file(s) with real-looking secrets inside your --roots: the agent can read them. Keep real secrets outside code folders (secret manager / shell environment) and commit only .env.example.`);
+  // SEC-16: is the running OmniRoute the pinned one?
+  if (dv.status === 0) {
+    try {
+      const pinned = composeImage(fs.readFileSync(path.join(ROOT, "docker-compose.yml"), "utf8"));
+      const cid = dockerOut(["compose", "ps", "-q", "omniroute"]).stdout.trim();
+      if (pinned && cid) {
+        const running = dockerOut(["inspect", cid, "--format", "{{.Image}}"]).stdout.trim();
+        const want = dockerOut(["image", "inspect", pinned, "--format", "{{.Id}}"]).stdout.trim();
+        if (!want) info(`pinned OmniRoute image is not pulled yet (${pinned.split("@")[0]}); node ar.mjs up pulls it`);
+        else (running === want ? ok : warn)(running === want ? `OmniRoute runs the pinned image (${pinned.split("@")[0]})` : "OmniRoute is not running the pinned image — recreate it: docker compose up -d --force-recreate omniroute");
+      }
+    } catch {}
+  }
   // SEC-04: nothing may listen beyond loopback, and the gateway container must reach the host bridge
   try {
     const composeText = fs.readFileSync(path.join(ROOT, "docker-compose.yml"), "utf8");
@@ -369,7 +382,7 @@ export function buildRoutingText(families, pool, base) {
 const REPO_DEFAULT = "so11on/auto-router";
 // never overwritten, never deleted: secrets, runtime data, backups, VCS
 const NEVER_TOUCH = [/^\.git\//, /^\.env$/, /^data\//, /^\.auto-router\//, /^node_modules\//, /\.bak/, /^\.DS_Store$/];
-const MERGED = new Set(["litellm/routing.yaml", "litellm/config.yaml"]);
+const MERGED = new Set(["litellm/routing.yaml", "litellm/config.yaml", "docker-compose.yml"]);
 const posix = (p) => p.split(path.sep).join("/");
 export function listFiles(dir, base = dir, out = []) {
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -381,6 +394,24 @@ export function listFiles(dir, base = dir, out = []) {
 }
 const blockOf = (text, begin, end) => { const a = text.indexOf(begin), b = text.indexOf(end); return a >= 0 && b > a ? text.slice(a + begin.length + 1, b).replace(/\n$/, "") : null; };
 /** New upstream config.yaml, with the locally managed blocks (openai / copilot models and fallbacks) carried over. */
+/** SEC-16: `update` never changes which image runs. Upstream's compose is taken, but each service keeps the image line this
+ *  install already pins. A floating tag (:latest, :main-stable, or no digest) is replaced by upstream's pinned line. */
+export function mergeCompose(local, upstream) {
+  const imageOf = (text) => {
+    const out = {}; let svc = null;
+    for (const line of text.split("\n")) {
+      const s = line.match(/^  ([\w-]+):\s*$/); if (s) svc = s[1];
+      const i = line.match(/^    image:\s*(\S+)/); if (i && svc) out[svc] = i[1];
+    }
+    return out;
+  };
+  const pinned = (ref) => /@sha256:[0-9a-f]{64}$/.test(ref) && !/:(latest|main-stable)(@|$)/.test(ref);
+  const mine = imageOf(local); let svc = null;
+  return upstream.split("\n").map((line) => {
+    const s = line.match(/^  ([\w-]+):\s*$/); if (s) svc = s[1];
+    return line.match(/^    image:\s*\S+/) && svc && mine[svc] && pinned(mine[svc]) ? line.replace(/image:\s*\S+/, `image: ${mine[svc]}`) : line;
+  }).join("\n");
+}
 export function mergeConfig(local, upstream) {
   let out = upstream;
   for (const [b, e] of [[OPENAI_BEGIN, OPENAI_END], [FB_BEGIN, FB_END], [CP_BEGIN, CP_END], [CPF_BEGIN, CPF_END]]) {
@@ -433,7 +464,8 @@ export function planSync(upDir, localDir) {
     const src = path.join(upDir, rel), dst = path.join(localDir, rel);
     if (MERGED.has(rel)) {
       const upText = fs.readFileSync(src, "utf8"), locText = fs.existsSync(dst) ? fs.readFileSync(dst, "utf8") : null;
-      const merged = locText === null ? upText : rel.endsWith("routing.yaml") ? mergeRouting(locText, upText) : mergeConfig(locText, upText);
+      const merged = locText === null ? upText : rel.endsWith("routing.yaml") ? mergeRouting(locText, upText)
+        : rel === "docker-compose.yml" ? mergeCompose(locText, upText) : mergeConfig(locText, upText);
       plan.texts[rel] = merged;
       if (locText === null) plan.add.push(rel); else if (merged !== locText) { plan.change.push(rel); plan.merged.push(rel); } else plan.same++;
     } else if (!fs.existsSync(dst)) plan.add.push(rel);
@@ -876,6 +908,124 @@ async function omniroute(flags) {
   info("Apply to the gateway: docker compose up -d --force-recreate litellm");
 }
 
+// ---------------------------------------------------------------- omniroute: contract check and safe upgrade (SEC-16)
+const COMPOSE_FILE = path.join(ROOT, "docker-compose.yml");
+const OMNI_REPO = "diegosouzapw/omniroute";
+export function composeImage(text, service = "omniroute") {
+  let svc = null;
+  for (const line of text.split("\n")) {
+    const s = line.match(/^  ([\w-]+):\s*$/); if (s) svc = s[1];
+    const i = line.match(/^    image:\s*(\S+)/); if (i && svc === service) return i[1];
+  }
+  return null;
+}
+export function setComposeImage(text, service, ref) {
+  let svc = null;
+  return text.split("\n").map((line) => {
+    const s = line.match(/^  ([\w-]+):\s*$/); if (s) svc = s[1];
+    return svc === service && /^    image:\s*\S+/.test(line) ? `    image: ${ref}` : line;
+  }).join("\n");
+}
+async function contractReport(base, password, key, chat) {
+  const { runContract, failed } = await import("./scripts/omniroute-contract.mjs");
+  const res = await runContract({ base, password, key, chat });
+  for (const r of res) (r.ok ? ok : r.required ? bad : warn)(`${r.name}${r.detail ? "  — " + r.detail : ""}`);
+  return failed(res).length === 0;
+}
+async function omnirouteCheck() {
+  const e = readEnv();
+  if (!e?.OMNIROUTE_PASSWORD) return bad("no .env / OMNIROUTE_PASSWORD — run: node ar.mjs init");
+  if (!(await portOpen(20128))) return bad("OmniRoute is not running — run: node ar.mjs up");
+  const good = await contractReport(OMNI, e.OMNIROUTE_PASSWORD, e.FREE_POOL_KEY || null, e.FREE_POOL_KEY ? "free-fast" : null);
+  process.exitCode = good ? 0 : 1;
+  (good ? ok : bad)(good ? "OmniRoute honours the contract the gateway depends on" : "OmniRoute does not honour the contract — see docs/OMNIROUTE-CONTRACT.md before using the free pool");
+}
+const dockerOut = (args) => spawnSync("docker", args, { cwd: ROOT, encoding: "utf8" });
+async function omnirouteUpgrade(flags) {
+  const compose0 = fs.readFileSync(COMPOSE_FILE, "utf8");
+  const current = composeImage(compose0);
+  if (!current) return bad("could not find the omniroute image line in docker-compose.yml");
+  const to = flags.to && flags.to !== true ? String(flags.to) : null;
+  if (!to && !flags.rollback) {
+    info(`pinned now: ${current}`);
+    try {
+      const r = await http(`https://hub.docker.com/v2/repositories/${OMNI_REPO}/tags?page_size=15&ordering=last_updated`, { timeout: 15000 });
+      const names = (r.json?.results || []).map((x) => x.name);
+      info(`recent tags: ${names.join(", ") || "(could not list)"}`);
+    } catch { warn("could not reach Docker Hub to list tags"); }
+    info("to test and switch:  node ar.mjs omniroute-upgrade --to <tag>   (add --dry-run to only test)   ·   undo:  --rollback");
+    return;
+  }
+  const backups = path.join(DATA, "backups");
+  const volumeOf = () => {
+    const id = dockerOut(["compose", "ps", "-q", "omniroute"]).stdout.trim();
+    if (!id) return null;
+    const m = JSON.parse(dockerOut(["inspect", id, "--format", "{{json .Mounts}}"]).stdout || "[]").find((x) => x.Destination === "/app/data");
+    return m?.Name || null;
+  };
+  const lastGood = path.join(DATA, "omniroute-last-good.json");
+  const recreate = async () => {
+    const r = spawnSync("docker", ["compose", "up", "-d", "--force-recreate", "omniroute"], { cwd: ROOT, stdio: "ignore" });
+    for (let i = 0; i < 40 && !(await portOpen(20128)); i++) await sleep(1500);
+    await sleep(5000);
+    spawnSync("docker", ["compose", "up", "-d", "litellm"], { cwd: ROOT, stdio: "ignore" }); // stopping omniroute also stopped the gateway
+    return r.status === 0;
+  };
+
+  if (flags.rollback) {
+    if (!fs.existsSync(lastGood)) return bad("nothing to roll back: data/omniroute-last-good.json does not exist");
+    const lg = JSON.parse(fs.readFileSync(lastGood, "utf8"));
+    fs.writeFileSync(COMPOSE_FILE, setComposeImage(compose0, "omniroute", lg.image));
+    const vol = volumeOf();
+    if (lg.backup && fs.existsSync(lg.backup) && vol) {
+      spawnSync("docker", ["compose", "stop", "omniroute"], { cwd: ROOT, stdio: "ignore" });
+      const rr = dockerOut(["run", "--rm", "--entrypoint", "sh", "-v", `${vol}:/data`, "-v", `${path.dirname(lg.backup)}:/backup:ro`, lg.image, "-c", `rm -rf /data/* /data/.[!.]* 2>/dev/null; tar xf /backup/${path.basename(lg.backup)} -C /data`]);
+      (rr.status === 0 ? ok : warn)(rr.status === 0 ? "restored the OmniRoute data volume from the backup" : "could not restore the volume: " + (rr.stderr || "").slice(0, 120));
+    } else warn("no volume backup to restore; only the image is rolled back");
+    (await recreate()) ? ok(`OmniRoute is back on ${lg.image}`) : bad("could not recreate OmniRoute — run: docker compose up -d omniroute");
+    return;
+  }
+
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(to)) return bad("--to must be an image tag such as 3.9.0");
+  const candidate = `${OMNI_REPO}:${to}`;
+  info(`candidate ${candidate}; nothing is changed unless every step passes`);
+  const pull = dockerOut(["pull", candidate]);
+  if (pull.status !== 0) return bad(`could not pull ${candidate}: ${(pull.stderr || "").trim().split("\n").pop()}`);
+  const digest = dockerOut(["image", "inspect", candidate, "--format", "{{index .RepoDigests 0}}"]).stdout.trim().split("@")[1];
+  if (!/^sha256:[0-9a-f]{64}$/.test(digest || "")) return bad("could not read the candidate's digest");
+  const ref = `${candidate}@${digest}`;
+  const port = 20129, name = "ar-omniroute-candidate", pw = crypto.randomBytes(12).toString("hex");
+  dockerOut(["rm", "-f", name]);
+  const started = dockerOut(["run", "-d", "--rm", "--name", name, "-p", `127.0.0.1:${port}:20128`, "-e", "REQUIRE_API_KEY=true", "-e", `INITIAL_PASSWORD=${pw}`, ref]);
+  if (started.status !== 0) return bad(`could not start the candidate: ${(started.stderr || "").trim().slice(0, 160)}`);
+  let passed = false;
+  try {
+    for (let i = 0; i < 40 && !(await portOpen(port)); i++) await sleep(1500);
+    await sleep(6000);
+    info("running the contract against the candidate (fresh data, no providers, no real prompts)");
+    passed = await contractReport(`http://127.0.0.1:${port}`, pw, null, null);
+  } finally { dockerOut(["rm", "-f", name]); }
+  if (!passed) return bad("the candidate does not honour the contract — nothing was changed");
+  ok("candidate passes the contract");
+  if (flags["dry-run"]) { info(`dry run: would pin ${ref}`); return; }
+
+  fs.mkdirSync(backups, { recursive: true, mode: 0o700 });
+  const vol = volumeOf();
+  const backup = path.join(backups, `omniroute-${new Date().toISOString().replace(/[:.]/g, "-")}.tar`);
+  if (vol) {
+    const b = dockerOut(["run", "--rm", "--entrypoint", "sh", "-v", `${vol}:/data:ro`, "-v", `${backups}:/backup`, current, "-c", `tar cf /backup/${path.basename(backup)} -C /data .`]);
+    if (b.status !== 0) return bad("could not back up the OmniRoute data volume — nothing was changed: " + (b.stderr || "").slice(0, 120));
+    fs.chmodSync(backup, 0o600); ok(`backed up the data volume → ${path.relative(ROOT, backup)}`);
+  } else warn("no running OmniRoute volume found; continuing without a data backup");
+  fs.writeFileSync(lastGood, JSON.stringify({ image: current, backup: vol ? backup : null, at: new Date().toISOString() }, null, 2), { mode: 0o600 });
+  fs.writeFileSync(COMPOSE_FILE, setComposeImage(compose0, "omniroute", ref));
+  const revert = async (why) => { fs.writeFileSync(COMPOSE_FILE, compose0); await recreate(); bad(`${why} — reverted to ${current}`); };
+  if (!(await recreate())) return revert("could not start the new OmniRoute");
+  const e = readEnv() || {};
+  if (!(await contractReport(OMNI, e.OMNIROUTE_PASSWORD, e.FREE_POOL_KEY || null, e.FREE_POOL_KEY ? "free-fast" : null))) return revert("the contract failed on the running instance");
+  ok(`OmniRoute pinned to ${ref}. Run: node ar.mjs omniroute   (re-verify the pool)   then   node ar.mjs smoke`);
+}
+
 // ---------------------------------------------------------------- vscode
 function findCode() {
   const w = which(IS_WIN ? "code.cmd" : "code") || which("code");
@@ -1038,7 +1188,8 @@ const HELP = `auto-router — node ar.mjs <command>
   copilot     [--mini ID --main ID --max ID] [--check]   use your paid GitHub Copilot plan (Copilot CLI)
   openai      [--list] [--route cli|api|both] [--mini ID --main ID --max ID] [--check]   OpenAI via ChatGPT login (Codex CLI) and/or API key
   up | down | status
-  omniroute   [--no-llm7]   connect free providers, verify models, build the combos
+  omniroute   [--no-llm7] [--check]   connect free providers, verify models, build the combos; --check tests the OmniRoute contract
+  omniroute-upgrade   [--to <tag> [--dry-run]] [--rollback]   list tags / test a new OmniRoute on a spare port and switch only if it passes
   vscode      [--uninstall] [--insiders] [--dir <path>]
   smoke       one request per profile
   logs        [-f] [--errors] [--tail N] [--type T] [--rid ID] [--since 30m] [--raw]
@@ -1064,7 +1215,8 @@ async function main() {
     case "up": return up(flags);
     case "down": return down();
     case "status": return status();
-    case "omniroute": return omniroute(flags);
+    case "omniroute": return flags.check ? omnirouteCheck() : omniroute(flags);
+    case "omniroute-upgrade": return omnirouteUpgrade(flags);
     case "vscode": return vscode(flags);
     case "smoke": return smoke();
     case "logs": return logs(flags);
