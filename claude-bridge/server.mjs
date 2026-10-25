@@ -213,6 +213,15 @@ function detectWorkspace(messages, header, saved) {
   return best?.[0] || DEFAULT_CWD;
 }
 
+// SEC-02: a conversation is identified by its opening system prompt(s), first user message AND resolved workspace, so two
+// chats that start with the same words in different projects never share a CLI session.
+function conversationId(messages, header, prefix = "") {
+  const system = messages.filter((m) => m.role === "system" || m.role === "developer").slice(0, 2).map((m) => textOf(m.content).slice(0, 500)).join("\n");
+  const firstUser = textOf(messages.find((m) => m.role === "user")?.content).slice(0, 2000);
+  const ws = norm(detectWorkspace(messages, header, null));
+  return { convId: prefix + createHash("sha1").update(`${system}\u0000${firstUser}\u0000${ws}`).digest("hex"), ws };
+}
+
 function transcript(msgs) {
   const out = [];
   for (const m of msgs) {
@@ -257,8 +266,7 @@ async function handle(req, res, body) {
   const messages = body.messages || [];
   const lastUserIdx = messages.map((m) => m.role).lastIndexOf("user");
   const task = textOf(messages[lastUserIdx]?.content).trim();
-  const firstUser = textOf(messages.find((m) => m.role === "user")?.content).slice(0, 2000);
-  const convId = createHash("sha1").update(firstUser).digest("hex");
+  const { convId } = conversationId(messages, req.headers["x-workspace"]);
   const hasTools = Array.isArray(body.tools) && body.tools.length > 0;
   const modeHeader = req.headers["x-claude-mode"];
   const permission = PERMISSION_MODES.has(modeHeader) ? modeHeader : (hasTools ? AGENT_MODE : "plan");
@@ -418,8 +426,7 @@ async function handleCodex(req, res, body) {
   const messages = body.messages || [];
   const lastUserIdx = messages.map((m) => m.role).lastIndexOf("user");
   const task = textOf(messages[lastUserIdx]?.content).trim();
-  const firstUser = textOf(messages.find((m) => m.role === "user")?.content).slice(0, 2000);
-  const convId = "codex:" + createHash("sha1").update(firstUser).digest("hex");
+  const { convId } = conversationId(messages, req.headers["x-workspace"], "codex:");
   const wantedSandbox = req.headers["x-codex-sandbox"];
   const sandbox = CODEX_SANDBOXES.has(wantedSandbox) ? wantedSandbox : (Array.isArray(body.tools) && body.tools.length ? CODEX_AGENT_SANDBOX : "read-only");
   const effort = { low: "low", medium: "medium", high: "high" }[body.reasoning_effort] || null;
@@ -518,8 +525,7 @@ async function handleCopilot(req, res, body) {
   const messages = body.messages || [];
   const lastUserIdx = messages.map((m) => m.role).lastIndexOf("user");
   const task = textOf(messages[lastUserIdx]?.content).trim();
-  const firstUser = textOf(messages.find((m) => m.role === "user")?.content).slice(0, 2000);
-  const convId = "copilot:" + createHash("sha1").update(firstUser).digest("hex");
+  const { convId } = conversationId(messages, req.headers["x-workspace"], "copilot:");
   const agent = Array.isArray(body.tools) && body.tools.length > 0 && req.headers["x-copilot-mode"] !== "read-only";
   const stream = body.stream === true;
   if (!Object.hasOwn(COPILOT_MODELS, body.model)) {

@@ -162,3 +162,17 @@ test("SEC-03: symlinks out of the roots are refused; tool output does not pick t
     } finally { fs.rmSync(outside, { recursive: true, force: true }); }
   });
 });
+
+test("SEC-02: same first message in two workspaces are two conversations", { skip }, async () => {
+  await withBridge(async ({ port, ws, tmp }) => {
+    const other = path.join(tmp, "other"); fs.mkdirSync(other); fs.writeFileSync(path.join(other, "package.json"), "{}");
+    const msgs = [{ role: "system", content: "You are a coding assistant." }, { role: "user", content: "fix the bug" }];
+    for (const w of [ws, other, ws]) await post(port, { model: "codex-code-main", messages: msgs }, { "x-workspace": w });
+    const state = JSON.parse(fs.readFileSync(path.join(tmp, "state.json"), "utf8"));
+    const ids = Object.keys(state).filter((k) => k.startsWith("codex:"));
+    assert.equal(ids.length, 2);
+    const again = await (await post(port, { model: "codex-code-main", messages: [{ role: "system", content: "Another system prompt." }, msgs[1]] }, { "x-workspace": ws })).json();
+    assert.equal(Object.keys(JSON.parse(fs.readFileSync(path.join(tmp, "state.json"), "utf8"))).filter((k) => k.startsWith("codex:")).length, 3);
+    assert.ok(again.choices);
+  });
+});

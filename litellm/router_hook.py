@@ -706,7 +706,8 @@ class AutoRouter(CustomLogger):
         # conversation key from the ORIGINAL text, so it stays stable across turns whatever the masking does
         messages = _as_messages(data)
         first_user = next((_text(m.get("content")) for m in messages if m.get("role") == "user"), "")
-        key = hashlib.sha1(f"{mode}:{first_user[:2000]}".encode()).hexdigest()
+        first_system = next((_text(m.get("content")) for m in messages if m.get("role") in ("system", "developer")), "")
+        key = hashlib.sha1(f"{mode}:{first_system[:500]}\x00{first_user[:2000]}".encode()).hexdigest()
         # DLP runs before any model (classifier, summary, memory) sees the request
         dres = dlp.scan_and_mask(data, s) if s["sensitive_guard"] == "on" or s["mask_secrets"] == "on" else dlp.DlpResult()
         messages = _as_messages(data)
