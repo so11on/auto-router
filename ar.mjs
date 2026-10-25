@@ -143,6 +143,32 @@ async function doctor() {
     const open = await portOpen(port);
     info(`port ${port} (${name}): ${open ? "in use (running, or something else)" : "free"}`);
   }
+  // SEC-10: secrets out of the agent's reach, files private
+  const modeOf = (p) => { try { return fs.statSync(p).mode & 0o777; } catch { return null; } };
+  if (!IS_WIN) {
+    for (const [p, want, label] of [[ENV_FILE, 0o600, ".env"], ...(process.platform === "linux" ? [] : [[DATA, 0o700, "data/"]]), [HOME_CFG_DIR, 0o700, "~/.auto-router/"]]) {
+      const m = modeOf(p);
+      if (m === null) continue;
+      if (m & 0o077) warn(`${label} is readable by other users (mode ${m.toString(8)}) — run: chmod ${want.toString(8)} ${p}`);
+      else ok(`${label} permissions are private`);
+    }
+  }
+  const envNow = readEnv() || {};
+  const rootsNow = String(envNow.BRIDGE_ALLOWED_ROOTS || "").split(",").map((r) => r.trim()).filter(Boolean);
+  for (const p of rootProblems(rootsNow)) warn(p.msg);
+  let envFiles = 0;
+  const walk = (dir, depth) => {
+    if (depth > 3 || envFiles > 50) return;
+    let ents; try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      if (e.isDirectory()) { if (!/^(node_modules|\.git|\.venv|venv|__pycache__|dist|build)$/.test(e.name)) walk(path.join(dir, e.name), depth + 1); }
+      else if (/^\.env(\.(?!example|sample|template)[\w.-]+)?$/.test(e.name)) {
+        try { if (/^[A-Z][A-Z0-9_]*(KEY|TOKEN|SECRET|PASSWORD)\s*=\s*[^\s#]{8,}/m.test(fs.readFileSync(path.join(dir, e.name), "utf8").slice(0, 20000))) envFiles++; } catch {}
+      }
+    }
+  };
+  for (const r of rootsNow) if (!inside(ROOT, r)) walk(r, 0);
+  if (envFiles) warn(`${envFiles} .env file(s) with real-looking secrets inside your --roots: the agent can read them. Keep real secrets outside code folders (secret manager / shell environment) and commit only .env.example.`);
   // SEC-04: nothing may listen beyond loopback, and the gateway container must reach the host bridge
   try {
     const composeText = fs.readFileSync(path.join(ROOT, "docker-compose.yml"), "utf8");
@@ -175,6 +201,18 @@ const KEY_LINKS = {
   NVIDIA_API_KEY: "https://build.nvidia.com (free NVIDIA Developer Program)",
   CLOUDFLARE_API_TOKEN: "Cloudflare dashboard → Workers AI → Use REST API → create the Workers AI token (also shows CLOUDFLARE_ACCOUNT_ID): https://dash.cloudflare.com",
 };
+// SEC-10: the agent can read and edit everything under --roots, so neither the gateway's own secrets nor a whole home may be there.
+const realOr = (p) => { try { return fs.realpathSync.native(p); } catch { return path.resolve(p); } };
+const inside = (child, parent) => { const c = realOr(child), r = realOr(parent); return c === r || c.startsWith(r + path.sep); };
+export function rootProblems(roots, repo = ROOT, home = os.homedir()) {
+  const out = [];
+  for (const r of roots) {
+    const real = realOr(r);
+    if (real === realOr(home) || real === path.parse(real).root) out.push({ fatal: true, root: r, msg: `--roots ${r} is your whole home folder or the disk root: the agent could read every secret you own. Pick the folder where you keep code.` });
+    else if (inside(repo, r)) out.push({ fatal: false, root: r, msg: `O auto-router está dentro de uma pasta que o agente pode ler/editar (${r}). Mova o auto-router para fora (ex.: ~/.local/share/auto-router) ou escolha outro --roots.` });
+  }
+  return out;
+}
 function init(flags) {
   const profile = String(flags.profile || "A").toUpperCase();
   const auto = profile === "AUTO";
@@ -195,6 +233,11 @@ function init(flags) {
   const roots = String(rootsRaw).split(",").map((r) => path.resolve(r.trim().replace(/^~(?=$|[\\/])/, os.homedir())));
   const missing = roots.filter((r) => !fs.existsSync(r));
   if (missing.length) { bad(`folder does not exist: ${missing.join(", ")}`); process.exit(1); }
+  for (const p of rootProblems(roots)) {
+    if (p.fatal) { bad(p.msg); process.exit(1); }
+    if (flags["force-unsafe-roots"]) warn(p.msg + "  (continuing because of --force-unsafe-roots)");
+    else { bad(p.msg); info("Only for a throwaway test: --force-unsafe-roots"); process.exit(1); }
+  }
 
   if (fs.existsSync(ENV_FILE) && !flags.force) {
     warn(".env already exists — keeping it (use --force to recreate). Updating profile and local config only.");
@@ -224,8 +267,9 @@ function init(flags) {
   if (fs.existsSync(target) && fs.readFileSync(target, "utf8") !== routingText) fs.copyFileSync(target, target + ".bak");
   fs.writeFileSync(target, routingText);
   ok(`routing profile ${auto ? "auto" : profile} → litellm/routing.yaml`);
-  fs.mkdirSync(DATA, { recursive: true });
-  fs.mkdirSync(HOME_CFG_DIR, { recursive: true });
+  // data/ stays 0755 on Linux: the container's root has no capabilities (cap_drop ALL) and could not write a 0700 folder owned by you
+  fs.mkdirSync(DATA, { recursive: true, ...(process.platform === "linux" ? {} : { mode: 0o700 }) });
+  fs.mkdirSync(HOME_CFG_DIR, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(HOME_CFG_DIR, "config.json"), JSON.stringify({ repo: ROOT, stateFile: path.join(DATA, "context-state.json") }, null, 2));
   ok(`remembered this folder in ${path.join(HOME_CFG_DIR, "config.json")} (used by the VS Code extension)`);
 

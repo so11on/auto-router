@@ -238,3 +238,18 @@ test("no personal data or secrets are shipped", () => {
   }
   assert.deepEqual(hits, []);
 });
+
+test("SEC-10: roots may not contain the auto-router itself, the home folder or the disk root", async () => {
+  const { rootProblems } = await import("../ar.mjs");
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "ar-repo-"));
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), "ar-code-"));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "ar-home-"));
+  try {
+    assert.deepEqual(rootProblems([other], repo, home), []);
+    const inRepo = rootProblems([path.dirname(repo)], repo, home);
+    assert.equal(inRepo.length, 1);
+    assert.match(inRepo[0].msg, /dentro de uma pasta/);
+    assert.equal(rootProblems([home], repo, home)[0].fatal, true);
+    assert.equal(rootProblems([path.parse(os.tmpdir()).root], repo, home)[0].fatal, true);
+  } finally { for (const d of [repo, other, home]) fs.rmSync(d, { recursive: true, force: true }); }
+});
