@@ -27,9 +27,19 @@ import yaml
 from litellm.integrations.custom_logger import CustomLogger
 
 import context as ctxmod
+import dlp
 import policy
 import registry
+import safety
 from quota import Tracker
+
+try:  # inside the proxy; a plain stand-in elsewhere (tests)
+    from fastapi import HTTPException
+except Exception:  # pragma: no cover
+    class HTTPException(Exception):
+        def __init__(self, status_code: int = 500, detail=""):
+            super().__init__(str(detail))
+            self.status_code, self.detail = status_code, detail
 
 ROUTING_FILE = os.environ.get("ROUTING_FILE", "/app/routing.yaml")
 CLASSIFIER_MODEL = os.environ.get("CLASSIFIER_MODEL", "gemini/gemini-3.5-flash-lite")
@@ -42,6 +52,9 @@ EVENT_FILE = os.environ.get("EVENT_LOG", "/app/data/router.jsonl")
 MAX_LOG_BYTES = 10_000_000
 MAX_CONTINUATIONS = 3
 FREE_FALLBACK_MODEL = "gemini-free-flash-lite"
+# last resorts after the profile ladder; each is still filtered by safety / sensitivity / profile per request
+FALLBACK_TAIL = {"free": ["gemini-free-flash-lite"], "balanced": ["gemini-flash"], "smart": ["gemini-pro"]}
+CLASSIFIER_MAX_CHARS = int(os.environ.get("CLASSIFIER_MAX_CHARS", "4000"))
 SHOW_FOOTER = os.environ.get("AUTO_ROUTER_FOOTER", "true").lower() == "true"
 DATA_DIR = os.path.dirname(USAGE_FILE)
 STATE_FILE = os.path.join(DATA_DIR, "context-state.json")
@@ -215,24 +228,52 @@ def _heuristic(text: str) -> dict:
     return {"task": task, "complexity": complexity, "source": "heuristic"}
 
 
-async def _llm_json(mode: str, system: str, text: str, max_tokens: int):
-    """Small helper call used by the classifier and the summarizer. auto-free uses the free pool, so it stays free."""
+def _classifier_privacy() -> str:
+    """Privacy class of the model CLASSIFIER_MODEL points at (unknown strings are unsafe)."""
+    cm = CLASSIFIER_MODEL
+    if cm == "pool":
+        return safety.privacy_of("free-pool-fast")
+    if cm.startswith("gemini/") and os.environ.get("GEMINI_API_KEY"):
+        return safety.privacy_of("gemini-flash-lite")  # paid key: trusted
+    if cm.startswith(("groq/", "cloudflare/")):
+        return "no_retention"
+    return "unsafe"
+
+
+def _internal_route(mode: str, s: dict, sensitive: bool):
+    """Where classifier / checkpoint / summary calls may go: 'pool', 'paid' or None (then: heuristic / no LLM summary).
+    auto-free never uses a paid key. Every route must pass SAFETY_MODE and, for sensitive text, the sensitive-class check."""
+    def ok(privacy: str) -> bool:
+        if s["safety_mode"] == "on" and privacy == "unsafe":
+            return False
+        return not sensitive or (privacy in s["sensitive_allowed"] and privacy not in safety.NEVER_SENSITIVE)
+    pool_ok = FREE_POOL_ENABLED and ok(safety.privacy_of("free-pool-fast"))
+    if mode == "free" or CLASSIFIER_MODEL == "pool":
+        return "pool" if pool_ok else None
+    return "paid" if ok(_classifier_privacy()) else (("pool" if pool_ok else None))
+
+
+async def _llm_json(route, system: str, text: str, max_tokens: int):
+    """Small helper call used by the classifier and the summarizer. `route` comes from _internal_route()."""
+    if route is None:
+        raise RuntimeError("no model allowed for internal calls")  # callers fall back to the heuristic
     msgs = [{"role": "system", "content": system}, {"role": "user", "content": text}]
-    if CLASSIFIER_MODEL == "pool" and not FREE_POOL_ENABLED:
-        raise RuntimeError("CLASSIFIER_MODEL=pool needs FREE_POOL_ENABLED=true")  # caller falls back to the heuristic
-    if (mode == "free" or CLASSIFIER_MODEL == "pool") and FREE_POOL_ENABLED:
+    if route == "pool":
         from litellm.proxy import proxy_server
         router = getattr(proxy_server, "llm_router", None)
-        if router is not None:
-            return await router.acompletion(model="free-pool-fast", messages=msgs, max_tokens=max(max_tokens, 400),
-                                            temperature=0, timeout=15, metadata={"classifier": True})
+        if router is None:
+            raise RuntimeError("router not ready")
+        return await router.acompletion(model="free-pool-fast", messages=msgs, max_tokens=max(max_tokens, 400),
+                                        temperature=0, timeout=15, metadata={"classifier": True})
     return await litellm.acompletion(model=CLASSIFIER_MODEL, messages=msgs, max_tokens=max_tokens, temperature=0,
                                      timeout=15, metadata={"classifier": True})
 
 
-async def _classify(text: str, mode: str = "balanced", checkpoint: bool = False) -> dict:
+async def _classify(text: str, mode: str = "balanced", checkpoint: bool = False, s: dict = None, sensitive: bool = False) -> dict:
+    s = s or safety.settings()
     try:
-        r = await _llm_json(mode, CHECKPOINT_PROMPT if checkpoint else CLASSIFIER_PROMPT, text[:6000], 60)
+        r = await _llm_json(_internal_route(mode, s, sensitive), CHECKPOINT_PROMPT if checkpoint else CLASSIFIER_PROMPT,
+                            text[:CLASSIFIER_MAX_CHARS], 60)
         raw = r.choices[0].message.content or ""
         out = json.loads(raw[raw.find("{"):raw.rfind("}") + 1])
         task = out.get("task") if out.get("task") in TASKS else "explain"
@@ -247,10 +288,11 @@ def _checkpoint_text(messages: list, first_user: str) -> str:
     return f"Original request:\n{_request_text(first_user)[:1500]}\n\nLatest steps:\n{recent}"
 
 
-async def _summarize(mode: str, text: str, previous):
+async def _summarize(mode: str, text: str, previous, s: dict = None, sensitive: bool = False):
+    s = s or safety.settings()
     prompt = (f"Previous summary:\n{previous}\n\nNew part of the conversation:\n{text}" if previous else text)
     try:
-        r = await _llm_json(mode, SUMMARY_PROMPT, prompt[:60000], 1200)
+        r = await _llm_json(_internal_route(mode, s, sensitive), SUMMARY_PROMPT, prompt[:60000], 1200)
         return (r.choices[0].message.content or "").strip() or (previous or "")
     except Exception:
         return previous or "(summary unavailable)"
@@ -264,13 +306,22 @@ def _chunk_delta(chunk):
         return None
 
 
-def _fallback_chain(router, model: str) -> list:
-    """Fallback model groups configured for `model`, in order."""
+def _fallback_chain(router, model: str, request_data: dict = None) -> list:
+    """Fallback model groups for `model`, in order. The per-request chain computed by the router hook (already filtered by
+    safety, sensitivity and profile) wins over the static list in config.yaml; a static list is filtered here as well."""
+    meta = ((request_data or {}).get("metadata") or {}).get("auto_router") or {}
+    fb = meta.get("fallbacks")
+    if fb is not None:
+        if model == meta.get("model"):
+            return list(fb)
+        return list(fb[fb.index(model) + 1:]) if model in fb else []
     chain = []
     for entry in getattr(router, "fallbacks", None) or []:
         if isinstance(entry, dict) and model in entry:
             chain.extend(entry[model])
-    return chain
+    s = safety.settings()
+    sensitive = bool(meta.get("sensitive"))
+    return [m for m in chain if _model_allowed(m, s, sensitive, meta.get("mode"))]
 
 
 def _short_reason(err: Exception) -> str:
@@ -353,6 +404,9 @@ def _footer(request_data: dict, served_by: str, failed_over: list) -> str:
         if route.get("pin_note"):
             parts.append(route["pin_note"])
         parts.append(f"{route.get('task')} c{route.get('complexity')}" + (f" {route.get('effort')}" if route.get("effort") else ""))
+    if route.get("sensitive"):
+        kinds = (route.get("dlp") or {}).get("kinds") or {}
+        parts.append("🔒 sensível" + (f" ({', '.join(sorted(kinds))})" if kinds else "") + ": só modelos permitidos")
     if route.get("switch"):
         parts.append(f"switched: {route['switch']}")
     if route.get("ctx_pct") is not None:
@@ -399,6 +453,27 @@ def _footer_chunk(template, text: str):
 
 def _wants_footer(request_data: dict) -> bool:
     return SHOW_FOOTER and bool((request_data.get("metadata") or {}).get("auto_router"))
+
+
+# ---------- what a model may receive ----------
+def _model_allowed(name: str, s: dict, sensitive: bool, mode: str = None) -> bool:
+    """SAFETY_MODE, sensitive-content classes and (for auto-free) the free-only rule, on the name the gateway will really call."""
+    if not safety.allowed_by_safety(name, s):
+        return False
+    if sensitive and not safety.allowed_for_sensitive(name, s):
+        return False
+    if mode == "free" and not _is_free_model(name):
+        return False
+    return True
+
+
+def _blocked_message(sensitive: bool, kinds: dict, mode: str) -> str:
+    if sensitive:
+        what = ", ".join(sorted(kinds)) or "dados sensíveis"
+        return (f"Conteúdo sensível detectado ({what}). Nenhum modelo permitido para este perfil. "
+                "Use Auto: Balanced/Smart, remova os dados, ou ajuste SENSITIVE_ALLOWED_CLASSES.")
+    return ("Nenhum modelo disponível para este perfil com o modo de segurança ligado. "
+            "Rode `node ar.mjs omniroute` (pool gratuito seguro), use Auto: Balanced/Smart, ou `node ar.mjs safety off`.")
 
 
 # ---------- quota, context state, memory ----------
@@ -557,7 +632,7 @@ class AutoRouter(CustomLogger):
         messages = list(request_data["messages"])
         hops = 0
         while router is not None and hops < MAX_CONTINUATIONS:
-            candidates = [m for m in _fallback_chain(router, failed) if m not in tried]
+            candidates = [m for m in _fallback_chain(router, failed, request_data) if m not in tried]
             if not candidates:
                 break
             nxt = candidates[0]
@@ -627,9 +702,15 @@ class AutoRouter(CustomLogger):
         t0 = time.time()
         if data.get("messages"):
             data["messages"] = _strip_footer(data["messages"])
+        s = safety.settings()
+        # conversation key from the ORIGINAL text, so it stays stable across turns whatever the masking does
         messages = _as_messages(data)
         first_user = next((_text(m.get("content")) for m in messages if m.get("role") == "user"), "")
         key = hashlib.sha1(f"{mode}:{first_user[:2000]}".encode()).hexdigest()
+        # DLP runs before any model (classifier, summary, memory) sees the request
+        dres = dlp.scan_and_mask(data, s) if s["sensitive_guard"] == "on" or s["mask_secrets"] == "on" else dlp.DlpResult()
+        messages = _as_messages(data)
+        first_user = next((_text(m.get("content")) for m in messages if m.get("role") == "user"), "")
         now = time.time()
         for k in [k for k, (_, ts) in _sticky.items() if now - ts > STICKY_TTL]:
             del _sticky[k]
@@ -638,6 +719,11 @@ class AutoRouter(CustomLogger):
         cfg = {**policy.DEFAULT_SWITCHING, **(routing.get("switching") or {})}
         ccfg = {**DEFAULT_CONTEXT, **(routing.get("context") or {})}
         st = dict(_sticky.get(key, ({}, 0))[0])
+        # sensitivity is sticky: once a conversation held a secret, later turns keep the restricted routing
+        sensitive = bool(dres.sensitive and s["sensitive_guard"] == "on") or bool(st.get("sensitive"))
+        st["sensitive"] = sensitive
+        if dres.secrets or dres.pii or dres.error:
+            _event("dlp", rid=rid, session=key[:12], **dres.public())
         last = messages[-1] if messages else {}
         new_user_turn = last.get("role") == "user"
         sig = policy.signals(messages)
@@ -650,6 +736,11 @@ class AutoRouter(CustomLogger):
         pin = _find_pin(_text(last.get("content")), routing.get("pins", {})) if new_user_turn else None
         if pin and not _configured(_resolve(pin[1]["model"])):
             pin_note = f"ignored: {pin[0]} is not configured on this install"
+            if pin[2]:
+                last["content"] = _remove_text(last["content"], pin[2])
+            pin = None
+        if pin and not _model_allowed(_resolve(pin[1]["model"]), s, sensitive, None):
+            pin_note = f"ignored: {pin[0]} is not allowed by the safety settings" + (" for sensitive content" if sensitive else "")
             if pin[2]:
                 last["content"] = _remove_text(last["content"], pin[2])
             pin = None
@@ -671,7 +762,7 @@ class AutoRouter(CustomLogger):
         else:
             checkpoint = not new_user_turn
             text = _checkpoint_text(messages, first_user) if checkpoint else _text(last.get("content"))
-            cls = await _classify(text, mode, checkpoint=checkpoint)
+            cls = await _classify(text, mode, checkpoint=checkpoint, s=s, sensitive=sensitive)
             source = cls.get("source", "llm")
             target = policy.pick(routing, mode, cls["task"], cls["complexity"])
             decision, reason, switched = policy.decide(routing, mode, st, target, sig, new_user_turn, cfg)
@@ -686,14 +777,19 @@ class AutoRouter(CustomLogger):
         adj_reason = None
         if not decision.get("pinned"):
             before = decision["model"]
-            decision, adj_reason = policy.adjust(routing, mode, decision, health, fits, _resolve)
+            try:
+                decision, adj_reason = policy.adjust(routing, mode, decision, health, fits, _resolve,
+                                                     allowed=lambda n: _model_allowed(n, s, sensitive, mode))
+            except policy.Blocked:
+                _event("blocked", rid=rid, mode=mode, sensitive=sensitive, kinds=dres.kinds)
+                raise HTTPException(status_code=400, detail=_blocked_message(sensitive, dres.kinds, mode))
             if decision["model"] != before:
                 switched = True
         model = _resolve(decision["model"])
         window = registry.context_window(model)
         compacted = False
         if need > window * ccfg["compact_at"] and data.get("messages"):
-            data["messages"], _ = await ctxmod.compact(data["messages"], key, lambda t, p: _summarize(mode, t, p),
+            data["messages"], _ = await ctxmod.compact(data["messages"], key, lambda t, p: _summarize(mode, t, p, s, sensitive),
                                                        ccfg["keep_user_turns"])
             tokens = ctxmod.count_tokens(data["messages"], data.get("tools"))
             compacted = True
@@ -717,6 +813,13 @@ class AutoRouter(CustomLogger):
         data["model"] = model
         if decision.get("effort"):
             _apply_effort(data, str(call_type), model, decision["effort"])
+        # per-request fallbacks: only models this request may reach (safety, sensitivity, profile), never the static list
+        chain, seen = [], {model}
+        for n in [_resolve(m) for m in policy.ladder(routing, mode)] + list(FALLBACK_TAIL.get(mode, [])):
+            if n not in seen and _configured(n) and _model_allowed(n, s, sensitive, mode):
+                seen.add(n)
+                chain.append(n)
+        data["fallbacks"] = chain
 
         quota_now = _quota.status(model)
         # The chat's fullness is judged on the editor's side (its whole history vs the budget it was given), not on the
@@ -733,6 +836,7 @@ class AutoRouter(CustomLogger):
             "effort": decision.get("effort"), "pinned": decision.get("pinned"), "pin_note": pin_note,
             "ctx_pct": pct, "quota": quota_now.get("state"), "quota_info": quota_now,
             "switch": (adj_reason or reason) if handoff else None, "compacted": compacted,
+            "sensitive": sensitive, "dlp": dres.public(), "fallbacks": chain,
         }
 
         # ---- 4. memory + new-chat signal (background, never delays the answer) ----

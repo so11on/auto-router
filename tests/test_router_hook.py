@@ -12,6 +12,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.environ["ROUTING_FILE"] = os.path.join(ROOT, "litellm", "routing.yaml")
 os.environ["CLAUDE_PRIMARY"] = "cli"
 os.environ["FREE_POOL_ENABLED"] = "false"
+os.environ["SAFETY_MODE"] = "off"  # legacy routing tests; safety-on behaviour lives in test_hook_safety.py
+os.environ["SENSITIVE_GUARD"] = "off"
+os.environ["SENSITIVE_MASK_SECRETS"] = "off"
 os.environ["EVENT_LOG"] = os.path.join(ROOT, "data", "test-router.jsonl")
 os.environ["USAGE_FILE"] = os.path.join(ROOT, "data", "test-usage.jsonl")
 

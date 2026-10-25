@@ -98,24 +98,39 @@ def decide(routing: dict, mode: str, state: dict, target: dict, sig: dict, new_u
     return current, "unchanged", False
 
 
-def adjust(routing: dict, mode: str, decision: dict, health, fits, resolve):
-    """Swap to another model of the same profile if the chosen one is out of quota or cannot hold the context.
+class Blocked(Exception):
+    """No model is allowed for this request (safety / sensitive content / profile)."""
 
-    health(name) -> state string, fits(name) -> bool, resolve(name) -> concrete model_name (claude-* -> -cli/-api).
-    Preference: the chosen model, then stronger ones (closest first), then cheaper ones."""
+
+def adjust(routing: dict, mode: str, decision: dict, health, fits, resolve, allowed=None):
+    """Swap to another model of the same profile if the chosen one is out of quota, cannot hold the context, or may not
+    receive this request (safety, sensitive content). Raises Blocked when nothing in the profile is allowed.
+
+    health(name) -> state string, fits(name) -> bool, resolve(name) -> concrete model_name (claude-* -> -cli/-api),
+    allowed(concrete_name) -> bool. Preference: the chosen model, then stronger ones (closest first), then cheaper ones."""
+    allowed = allowed or (lambda name: True)
     lad = ladder(routing, mode)
     model = decision["model"]
     if model not in lad:
+        if not allowed(resolve(model)):
+            raise Blocked(model)
         return decision, None
     i = lad.index(model)
     order = [model] + lad[i + 1:] + list(reversed(lad[:i]))
+    tier_of = lambda cand: next(t for t in routing["modes"][mode] if t["model"] == cand)
     for cand in order:
         concrete = resolve(cand)
+        if not allowed(concrete):
+            continue
         if health(concrete) in ("critical", "exhausted") or not fits(concrete):
             continue
         if cand == model:
             return decision, None
-        tier = next(t for t in routing["modes"][mode] if t["model"] == cand)
-        why = "quota" if health(resolve(model)) in ("critical", "exhausted") else "context"
-        return {**tier, "task": decision["task"], "complexity": decision["complexity"]}, f"{model} skipped ({why})"
-    return decision, "no healthy alternative; keeping choice"
+        why = "privacy" if not allowed(resolve(model)) else ("quota" if health(resolve(model)) in ("critical", "exhausted") else "context")
+        return {**tier_of(cand), "task": decision["task"], "complexity": decision["complexity"]}, f"{model} skipped ({why})"
+    for cand in order:  # nothing healthy: keep the first allowed one anyway
+        if allowed(resolve(cand)):
+            if cand == model:
+                return decision, "no healthy alternative; keeping choice"
+            return {**tier_of(cand), "task": decision["task"], "complexity": decision["complexity"]}, f"{model} skipped (privacy); no healthy alternative"
+    raise Blocked(model)
