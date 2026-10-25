@@ -16,6 +16,19 @@
 #          A model without `privacy` is treated as unsafe.
 # Verified 2026-10-24: Gemini and Claude windows from LiteLLM model info and Claude Code `modelUsage.contextWindow`;
 # pool windows from OmniRoute /v1/models per member model.
+# --- routing v3 fields (docs/ROUTING.md) ---
+# vendor / abbr   who makes it; the short name used in routing.yaml `aliases` and in docs
+# fit             suitability 0-5 per task type. ESTIMATES (the plan marks them [E]); calibrate with real tasks (docs/ROUTING.md, "Calibration")
+# vision, tools   0-5: image understanding; reliability of tool calls (agent mode filters on `tools`)
+# verbosity       how many more output tokens than a baseline model it tends to write (cost estimate)
+# price           USD per 1M tokens {in, out}; `schedule` = later prices from a date; `long_context` = other price above N prompt tokens;
+#                 `offpeak_utc` + `offpeak` = DeepSeek's discount window (the base price is the peak price)
+# subscription    true = used through a plan (CLI): no per-call money, but a scarcity factor applies while the plan has room
+# overhead_cli    tokens the CLI adds to every call (estimate, measure with `ar.mjs usage`)
+# needs           environment variable that must be set for the model to be available
+# needs_pool / via / omni   served through OmniRoute; `omni` is the id that must appear in data/pool-members.json (verified by `ar.mjs omniroute`)
+# pin_only        never chosen by the router, only by an explicit pin;  internal: used by the gateway itself, never chosen for a user task
+# Prices and fit numbers come from the vendors and from independent tests collected on 2026-10-24; they are data, change them here, not in code.
 
 defaults:
   context: 128000
@@ -23,39 +36,288 @@ defaults:
   quota: counted
 
 models:
-  # --- free pool (OmniRoute) ---
-  free-pool-fast:      {privacy: pool, context: 128000, quota: counted, limits: {rpm: 30, source: "Groq listed 30 rpm for gpt-oss-20b (first member)"}}
-  free-pool-coding:    {privacy: pool, context: 128000, quota: counted, limits: {rpm: 30, source: "Groq listed 30 rpm for gpt-oss-120b (first member)"}}
-  free-pool:           {privacy: pool, context: 128000, quota: counted}
-  pool-deepseek:       {privacy: unsafe, context: 64000,  quota: counted, limits: {tpd: 100000, rpm: 60, source: "LLM7 listed: 100K tokens/day, 60 rpm; context unknown, conservative"}}
-  pool-gpt-oss-120b:   {privacy: no_retention, context: 128000, quota: counted, limits: {rpm: 30, rpd: 1000, source: "Groq listed"}}
-  pool-nemotron-ultra: {privacy: unsafe, context: 128000, quota: counted, limits: {rpm: 40, rpd: 10000, source: "NVIDIA NIM listed"}}
-
-  # --- Gemini ---
-  gemini-free-flash-lite: {privacy: unsafe, context: 1048576, quota: counted, limits: {rpm: 15, source: "measured 2026-10-20 (429 body)"}}
-  gemini-flash-lite:      {privacy: trusted, context: 1048576, paid: true, quota: none}
-  gemini-flash:           {privacy: trusted, context: 1048576, paid: true, quota: none}
-  gemini-pro:             {privacy: trusted, context: 1048576, paid: true, quota: none}
-
-  # --- Claude: CLI bridge (subscription) and API ---
-  claude-haiku-cli:  {privacy: trusted, context: 1000000, quota: claude-subscription}
-  claude-sonnet-cli: {privacy: trusted, context: 1000000, quota: claude-subscription}
-  claude-opus-cli:   {privacy: trusted, context: 1000000, quota: claude-subscription}
-  claude-haiku-api:  {privacy: trusted, context: 1000000, paid: true, quota: none}
-  claude-sonnet-api: {privacy: trusted, context: 1000000, paid: true, quota: none}
-  claude-opus-api:   {privacy: trusted, context: 1000000, paid: true, quota: none}
-
-  # --- OpenAI: windows are conservative defaults; `node ar.mjs openai` can override them ---
-  gpt-mini-cli: {privacy: trusted, context: 128000, quota: none}
-  gpt-main-cli: {privacy: trusted, context: 128000, quota: none}
-  gpt-max-cli:  {privacy: trusted, context: 128000, quota: none}
-  gpt-mini-api: {privacy: trusted, context: 128000, paid: true, quota: none}
-  gpt-main-api: {privacy: trusted, context: 128000, paid: true, quota: none}
-  gpt-max-api:  {privacy: trusted, context: 128000, paid: true, quota: none}
-
-  # --- GitHub Copilot paid plan (Copilot CLI); premium-request allowance is not visible to us ---
-  copilot-mini: {privacy: trusted, context: 128000, quota: none}
-  copilot-main: {privacy: trusted, context: 128000, quota: none}
-  copilot-max:  {privacy: trusted, context: 128000, quota: none}
-
-  test-flaky: {privacy: unsafe, context: 32000, quota: none}
+  claude-opus-cli: {vendor: anthropic,
+      abbr: op,
+      privacy: trusted,
+      context: 1000000,
+      price: {in: 4, out: 20},
+      quota: claude-subscription, subscription: true, overhead_cli: 20000,
+      fit: {qa: 5, explain_code: 5, codegen: 5, feature: 5, frontend: 4, refactor: 5, debug: 5, test_review: 5, architecture: 5, data: 5, doc_tech: 5, writing: 5, research_long: 4},
+      vision: 4, tools: 5, verbosity: 1.0}
+  claude-opus-api: {vendor: anthropic,
+      abbr: op,
+      privacy: trusted,
+      context: 1000000,
+      price: {in: 4, out: 20},
+      paid: true, quota: none, needs: ANTHROPIC_API_KEY,
+      fit: {qa: 5, explain_code: 5, codegen: 5, feature: 5, frontend: 4, refactor: 5, debug: 5, test_review: 5, architecture: 5, data: 5, doc_tech: 5, writing: 5, research_long: 4},
+      vision: 4, tools: 5, verbosity: 1.0}
+  claude-sonnet-cli: {vendor: anthropic,
+      abbr: sn,
+      privacy: trusted,
+      context: 1000000,
+      price: {in: 2, out: 10},
+      quota: claude-subscription, subscription: true, overhead_cli: 20000,
+      fit: {qa: 4, explain_code: 4, codegen: 5, feature: 4, frontend: 4, refactor: 4, debug: 4, test_review: 4, architecture: 4, data: 4, doc_tech: 5, writing: 4, research_long: 4},
+      vision: 4, tools: 5, verbosity: 1.0}
+  claude-sonnet-api: {vendor: anthropic,
+      abbr: sn,
+      privacy: trusted,
+      context: 1000000,
+      price: {in: 2, out: 10},
+      paid: true, quota: none, needs: ANTHROPIC_API_KEY,
+      fit: {qa: 4, explain_code: 4, codegen: 5, feature: 4, frontend: 4, refactor: 4, debug: 4, test_review: 4, architecture: 4, data: 4, doc_tech: 5, writing: 4, research_long: 4},
+      vision: 4, tools: 5, verbosity: 1.0}
+  claude-haiku-cli: {vendor: anthropic,
+      abbr: hk,
+      privacy: trusted,
+      context: 1000000,
+      price: {in: 0.1, out: 0.5, long_context: {above: 100000, in: 0.5, out: 2.5}},
+      quota: claude-subscription, subscription: true, overhead_cli: 20000,
+      fit: {qa: 4, explain_code: 3, codegen: 4, feature: 2, frontend: 2, refactor: 3, debug: 2, test_review: 3, architecture: 2, data: 3, doc_tech: 3, writing: 3, research_long: 3},
+      vision: 3, tools: 4, verbosity: 1.0}
+  claude-haiku-api: {vendor: anthropic,
+      abbr: hk,
+      privacy: trusted,
+      context: 1000000,
+      price: {in: 0.1, out: 0.5, long_context: {above: 100000, in: 0.5, out: 2.5}},
+      paid: true, quota: none, needs: ANTHROPIC_API_KEY,
+      fit: {qa: 4, explain_code: 3, codegen: 4, feature: 2, frontend: 2, refactor: 3, debug: 2, test_review: 3, architecture: 2, data: 3, doc_tech: 3, writing: 3, research_long: 3},
+      vision: 3, tools: 4, verbosity: 1.0}
+  gpt-main-cli: {vendor: openai,
+      abbr: sol,
+      privacy: trusted,
+      context: 128000,
+      price: {in: 2, out: 10},
+      quota: none, subscription: true, overhead_cli: 20000,
+      fit: {qa: 4, explain_code: 4, codegen: 5, feature: 4, frontend: 4, refactor: 4, debug: 4, test_review: 4, architecture: 4, data: 5, doc_tech: 4, writing: 3, research_long: 4},
+      vision: 4, tools: 4, verbosity: 0.8}
+  gpt-mini-cli: {vendor: openai,
+      abbr: lu,
+      privacy: trusted,
+      context: 128000,
+      price: {in: 0.1, out: 0.5},
+      quota: none, subscription: true, overhead_cli: 20000, pin_only: true,
+      fit: {qa: 3, explain_code: 2, codegen: 3, feature: 1, frontend: 1, refactor: 2, debug: 1, test_review: 2, architecture: 1, data: 2, doc_tech: 2, writing: 2, research_long: 2},
+      vision: 3, tools: 4, verbosity: 1.0}
+  gpt-max-cli: {vendor: openai,
+      abbr: astra,
+      privacy: trusted,
+      context: 128000,
+      price: {in: 10, out: 50},
+      quota: none, subscription: true, overhead_cli: 20000, pin_only: true,
+      fit: {qa: 5, explain_code: 5, codegen: 5, feature: 5, frontend: 5, refactor: 5, debug: 5, test_review: 5, architecture: 5, data: 5, doc_tech: 5, writing: 4, research_long: 5},
+      vision: 4, tools: 4, verbosity: 0.8}
+  gpt-main-api: {vendor: openai,
+      abbr: sol,
+      privacy: trusted,
+      context: 128000,
+      price: {in: 2, out: 10},
+      paid: true, quota: none, needs: OPENAI_API_KEY,
+      fit: {qa: 4, explain_code: 4, codegen: 5, feature: 4, frontend: 4, refactor: 4, debug: 4, test_review: 4, architecture: 4, data: 5, doc_tech: 4, writing: 3, research_long: 4},
+      vision: 4, tools: 4, verbosity: 0.8}
+  gpt-mini-api: {vendor: openai,
+      abbr: lu,
+      privacy: trusted,
+      context: 128000,
+      price: {in: 0.1, out: 0.5},
+      paid: true, quota: none, needs: OPENAI_API_KEY, pin_only: true,
+      fit: {qa: 3, explain_code: 2, codegen: 3, feature: 1, frontend: 1, refactor: 2, debug: 1, test_review: 2, architecture: 1, data: 2, doc_tech: 2, writing: 2, research_long: 2},
+      vision: 3, tools: 4, verbosity: 1.0}
+  gpt-max-api: {vendor: openai,
+      abbr: astra,
+      privacy: trusted,
+      context: 128000,
+      price: {in: 10, out: 50},
+      paid: true, quota: none, needs: OPENAI_API_KEY, pin_only: true,
+      fit: {qa: 5, explain_code: 5, codegen: 5, feature: 5, frontend: 5, refactor: 5, debug: 5, test_review: 5, architecture: 5, data: 5, doc_tech: 5, writing: 4, research_long: 5},
+      vision: 4, tools: 4, verbosity: 0.8}
+  gemini-flash: {vendor: google,
+      abbr: gf,
+      privacy: trusted,
+      context: 1048576,
+      price: {in: 0.75, out: 3.75, schedule: [{from: "2027-01-01", in: 1.5, out: 7.5}]},
+      paid: true, quota: none, needs: GEMINI_API_KEY,
+      fit: {qa: 4, explain_code: 4, codegen: 4, feature: 4, frontend: 3, refactor: 4, debug: 3, test_review: 3, architecture: 3, data: 4, doc_tech: 3, writing: 3, research_long: 5},
+      vision: 5, tools: 4, verbosity: 1.2}
+  gemini-flash-lite: {vendor: google,
+      abbr: fl,
+      privacy: trusted,
+      context: 1048576,
+      price: {in: 0.3, out: 2.5},
+      paid: true, quota: none, needs: GEMINI_API_KEY,
+      fit: {qa: 3, explain_code: 3, codegen: 3, feature: 2, frontend: 2, refactor: 2, debug: 2, test_review: 2, architecture: 2, data: 3, doc_tech: 3, writing: 2, research_long: 4},
+      vision: 4, tools: 3, verbosity: 1.0}
+  gemini-pro: {vendor: google,
+      abbr: gp,
+      privacy: trusted,
+      context: 1048576,
+      price: {in: 2, out: 12},
+      paid: true, quota: none, needs: GEMINI_API_KEY,
+      fit: {qa: 4, explain_code: 4, codegen: 3, feature: 3, frontend: 3, refactor: 3, debug: 2, test_review: 3, architecture: 4, data: 4, doc_tech: 4, writing: 5, research_long: 5},
+      vision: 4, tools: 2, verbosity: 1.3}
+  gemini-argon: {vendor: google,
+      abbr: arg,
+      privacy: trusted,
+      context: 1000000,
+      price: {in: 2, out: 10, schedule: [{from: "2026-12-01", in: 4, out: 20}]},
+      paid: true, quota: none, needs: GEMINI_API_KEY, not_in_config_hint: "add to config.yaml after verifying the id",
+      fit: {qa: 4, explain_code: 4, codegen: 4, feature: 4, frontend: 3, refactor: 4, debug: 4, test_review: 4, architecture: 5, data: 4, doc_tech: 4, writing: 4, research_long: 5},
+      vision: 4, tools: 4, verbosity: 2.0}
+  gemini-free-flash-lite: {vendor: google,
+      abbr: gfl,
+      privacy: unsafe,
+      context: 1048576,
+      quota: counted, limits: {rpm: 15, source: "measured 2026-10-20 (429 body)"}, needs: GEMINI_FREE_API_KEY,
+      fit: {qa: 3, explain_code: 3, codegen: 3, feature: 2, frontend: 2, refactor: 2, debug: 2, test_review: 2, architecture: 2, data: 3, doc_tech: 3, writing: 2, research_long: 4},
+      vision: 4, tools: 3, verbosity: 1.0}
+  grok: {vendor: xai,
+      abbr: grk,
+      privacy: no_retention,
+      context: 500000,
+      price: {in: 2, out: 6, long_context: {above: 200000, in: 4, out: 12}},
+      paid: true, quota: none, needs: XAI_API_KEY, privacy_note: "xAI policy to confirm",
+      fit: {qa: 4, explain_code: 4, codegen: 4, feature: 4, frontend: 3, refactor: 4, debug: 3, test_review: 4, architecture: 4, data: 4, doc_tech: 4, writing: 3, research_long: 4},
+      vision: 3, tools: 3, verbosity: 1.8}
+  deepseek-flash: {vendor: deepseek,
+      abbr: dsf,
+      privacy: restricted,
+      context: 1000000,
+      price: {in: 0.3, out: 1.2, offpeak_utc: ["16:30","00:30"], offpeak: {in: 0.15, out: 0.6}},
+      paid: true, quota: none, needs: DEEPSEEK_API_KEY,
+      fit: {qa: 4, explain_code: 4, codegen: 4, feature: 3, frontend: 3, refactor: 4, debug: 3, test_review: 3, architecture: 3, data: 4, doc_tech: 3, writing: 3, research_long: 4},
+      vision: 3, tools: 4, verbosity: 1.2}
+  deepseek-pro: {vendor: deepseek,
+      abbr: dsp,
+      privacy: restricted,
+      context: 1000000,
+      price: {in: 0.66, out: 1.98},
+      paid: true, quota: none, needs: DEEPSEEK_API_KEY, pin_only: true,
+      fit: {qa: 4, explain_code: 4, codegen: 4, feature: 3, frontend: 3, refactor: 4, debug: 3, test_review: 3, architecture: 3, data: 4, doc_tech: 3, writing: 3, research_long: 4},
+      vision: 3, tools: 4, verbosity: 1.2}
+  copilot-mini: {vendor: github,
+      abbr: copilot_mini,
+      privacy: trusted,
+      context: 128000,
+      quota: none, subscription: true, overhead_cli: 20000, fit_estimated: true,
+      fit: {qa: 4, explain_code: 3, codegen: 4, feature: 2, frontend: 2, refactor: 3, debug: 2, test_review: 3, architecture: 2, data: 3, doc_tech: 3, writing: 3, research_long: 3},
+      vision: 3, tools: 4, verbosity: 1.0}
+  copilot-main: {vendor: github,
+      abbr: copilot_main,
+      privacy: trusted,
+      context: 128000,
+      quota: none, subscription: true, overhead_cli: 20000, fit_estimated: true,
+      fit: {qa: 4, explain_code: 4, codegen: 5, feature: 4, frontend: 4, refactor: 4, debug: 4, test_review: 4, architecture: 4, data: 4, doc_tech: 5, writing: 4, research_long: 4},
+      vision: 4, tools: 5, verbosity: 1.0}
+  copilot-max: {vendor: github,
+      abbr: copilot_max,
+      privacy: trusted,
+      context: 128000,
+      quota: none, subscription: true, overhead_cli: 20000, fit_estimated: true,
+      fit: {qa: 5, explain_code: 5, codegen: 5, feature: 5, frontend: 4, refactor: 5, debug: 5, test_review: 5, architecture: 5, data: 5, doc_tech: 5, writing: 5, research_long: 4},
+      vision: 4, tools: 5, verbosity: 1.0}
+  pool-gpt-oss-120b: {vendor: groq,
+      abbr: oss,
+      privacy: no_retention,
+      context: 128000,
+      paid: false, quota: counted, via: omniroute, needs_pool: true, omni: "groq/openai/gpt-oss-120b", limits: {rpm: 30, rpd: 1000, tpm: 8000, tpd: 200000, source: "Groq listed"},
+      fit: {qa: 3, explain_code: 2, codegen: 2, feature: 1, frontend: 1, refactor: 2, debug: 2, test_review: 2, architecture: 2, data: 2, doc_tech: 2, writing: 2, research_long: 2},
+      vision: 0, tools: 2, verbosity: 1.0}
+  pool-qwen: {vendor: groq,
+      abbr: qwen,
+      privacy: no_retention,
+      context: 128000,
+      paid: false, quota: counted, via: omniroute, needs_pool: true, omni: "groq/qwen/qwen3.8-27b", limits: {rpm: 30, source: "Groq plan; verify"},
+      fit: {qa: 3, explain_code: 3, codegen: 3, feature: 2, frontend: 2, refactor: 3, debug: 2, test_review: 2, architecture: 2, data: 3, doc_tech: 3, writing: 3, research_long: 2},
+      vision: 0, tools: 3, verbosity: 1.0}
+  pool-cf-llama: {vendor: cloudflare,
+      abbr: cfl,
+      privacy: no_retention,
+      context: 24000,
+      paid: false, quota: counted, via: omniroute, needs_pool: true, omni: "cloudflare-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast", context_verified: false,
+      fit: {qa: 3, explain_code: 2, codegen: 2, feature: 1, frontend: 2, refactor: 2, debug: 2, test_review: 2, architecture: 2, data: 2, doc_tech: 3, writing: 3, research_long: 2},
+      vision: 0, tools: 2, verbosity: 1.0}
+  pool-cf-coder: {vendor: cloudflare,
+      abbr: cfq,
+      privacy: no_retention,
+      context: 32000,
+      paid: false, quota: counted, via: omniroute, needs_pool: true, omni: "cloudflare-ai/@cf/qwen/qwen2.5-coder-32b-instruct", context_verified: false,
+      fit: {qa: 2, explain_code: 3, codegen: 3, feature: 2, frontend: 2, refactor: 3, debug: 2, test_review: 2, architecture: 1, data: 2, doc_tech: 2, writing: 1, research_long: 2},
+      vision: 0, tools: 2, verbosity: 1.0}
+  pool-cf-glm: {vendor: cloudflare,
+      abbr: cfg,
+      privacy: no_retention,
+      context: 32000,
+      paid: false, quota: counted, via: omniroute, needs_pool: true, omni: "cloudflare-ai/@cf/zai-org/glm-4.7-flash", context_verified: false,
+      fit: {qa: 3, explain_code: 3, codegen: 3, feature: 2, frontend: 2, refactor: 3, debug: 2, test_review: 2, architecture: 2, data: 3, doc_tech: 3, writing: 2, research_long: 3},
+      vision: 0, tools: 3, verbosity: 1.0}
+  pool-gemma: {vendor: ollama,
+      abbr: ogm,
+      privacy: no_retention,
+      context: 64000,
+      paid: false, quota: counted, via: omniroute, needs_pool: true, omni: "ollama-cloud/gemma4:31b", context_verified: false,
+      fit: {qa: 3, explain_code: 2, codegen: 2, feature: 2, frontend: 2, refactor: 2, debug: 2, test_review: 2, architecture: 2, data: 2, doc_tech: 3, writing: 3, research_long: 3},
+      vision: 2, tools: 2, verbosity: 1.0}
+  pool-nemotron-super: {vendor: ollama,
+      abbr: ons,
+      privacy: no_retention,
+      context: 64000,
+      paid: false, quota: counted, via: omniroute, needs_pool: true, omni: "ollama-cloud/nemotron-3-super", context_verified: false,
+      fit: {qa: 3, explain_code: 3, codegen: 3, feature: 2, frontend: 2, refactor: 2, debug: 2, test_review: 2, architecture: 3, data: 3, doc_tech: 2, writing: 2, research_long: 3},
+      vision: 0, tools: 3, verbosity: 1.0}
+  pool-deepseek: {vendor: llm7,
+      abbr: dsl,
+      privacy: unsafe,
+      context: 64000,
+      paid: false, quota: counted, via: omniroute, needs_pool: true, omni: "llm7/DeepSeek-V4-Flash-0731", limits: {tpd: 100000, rpm: 60, source: "LLM7 listed"},
+      fit: {qa: 3, explain_code: 3, codegen: 3, feature: 3, frontend: 3, refactor: 3, debug: 3, test_review: 3, architecture: 3, data: 3, doc_tech: 2, writing: 2, research_long: 2},
+      vision: 0, tools: 3, verbosity: 1.2}
+  pool-nemotron-ultra: {vendor: nvidia,
+      abbr: nem,
+      privacy: unsafe,
+      context: 128000,
+      paid: false, quota: counted, via: omniroute, needs_pool: true, omni: "nvidia/nvidia/nemotron-3-ultra-550b-a55b", limits: {rpm: 40, rpd: 10000, source: "NVIDIA NIM listed"},
+      fit: {qa: 3, explain_code: 3, codegen: 3, feature: 2, frontend: 2, refactor: 2, debug: 2, test_review: 2, architecture: 3, data: 3, doc_tech: 2, writing: 2, research_long: 3},
+      vision: 0, tools: 2, verbosity: 1.0}
+  pool-maverick: {vendor: openrouter,
+      abbr: mav,
+      privacy: unsafe,
+      context: 1000000,
+      paid: false, quota: counted, via: omniroute, needs_pool: true, omni: "openrouter/meta-llama/llama-4-maverick:free", not_verified: true,
+      fit: {qa: 3, explain_code: 2, codegen: 2, feature: 2, frontend: 2, refactor: 2, debug: 2, test_review: 2, architecture: 2, data: 2, doc_tech: 3, writing: 3, research_long: 4},
+      vision: 3, tools: 2, verbosity: 1.0}
+  pool-codestral: {vendor: mistral,
+      abbr: cst,
+      privacy: unsafe,
+      context: 128000,
+      paid: false, quota: counted, via: omniroute, needs_pool: true, omni: "mistral/codestral-latest",
+      fit: {qa: 2, explain_code: 3, codegen: 3, feature: 2, frontend: 2, refactor: 3, debug: 2, test_review: 2, architecture: 1, data: 2, doc_tech: 1, writing: 1, research_long: 2},
+      vision: 0, tools: 2, verbosity: 1.0}
+  free-pool-fast: {vendor: omniroute,
+      abbr: free-pool-fast,
+      privacy: pool,
+      context: 128000,
+      quota: counted, internal: true, via: omniroute, needs_pool: true,
+      fit: {qa: 3, explain_code: 3, codegen: 3, feature: 2, frontend: 2, refactor: 3, debug: 2, test_review: 2, architecture: 2, data: 3, doc_tech: 3, writing: 3, research_long: 2},
+      vision: 0, tools: 3, verbosity: 1.0}
+  free-pool-coding: {vendor: omniroute,
+      abbr: free-pool-coding,
+      privacy: pool,
+      context: 128000,
+      quota: counted, internal: true, via: omniroute, needs_pool: true,
+      fit: {qa: 3, explain_code: 3, codegen: 3, feature: 2, frontend: 2, refactor: 3, debug: 2, test_review: 2, architecture: 2, data: 3, doc_tech: 3, writing: 2, research_long: 3},
+      vision: 0, tools: 3, verbosity: 1.0}
+  free-pool: {vendor: omniroute,
+      abbr: free-pool,
+      privacy: pool,
+      context: 128000,
+      quota: counted, internal: true, via: omniroute, needs_pool: true,
+      fit: {qa: 3, explain_code: 3, codegen: 3, feature: 2, frontend: 2, refactor: 3, debug: 2, test_review: 2, architecture: 2, data: 3, doc_tech: 3, writing: 2, research_long: 3},
+      vision: 0, tools: 3, verbosity: 1.0}
+  test-flaky: {vendor: test,
+      abbr: flaky,
+      privacy: unsafe,
+      context: 32000,
+      quota: none, internal: true,
+      fit: {qa: 3, explain_code: 2, codegen: 2, feature: 1, frontend: 2, refactor: 2, debug: 2, test_review: 2, architecture: 2, data: 2, doc_tech: 3, writing: 3, research_long: 2},
+      vision: 0, tools: 2, verbosity: 1.0}

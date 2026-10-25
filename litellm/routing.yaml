@@ -1,43 +1,256 @@
-# mode -> ordered tiers. First tier with complexity <= max_complexity wins.
-# effort: low|medium|high -> sent as reasoning_effort (LiteLLM maps it per provider).
-# task_bump adds to the classified complexity (e.g. planning is harder than it looks).
-task_bump:
-  plan: 1
-  debug: 1
-  research: 0
-  codegen: 0
-  refactor: 0
-  explain: -1
+# Routing v3 (docs/ROUTING.md). Source of truth for WHICH models each profile may use for each kind of task.
+# The code (litellm/engine.py) only filters and reorders inside these lists: safety and sensitivity first, then availability,
+# tools / vision / context, quota, budget; then a quality floor and a cost rule. Prices and model facts live in models.yaml.
+#
+# routes[profile][task][band] = candidates, primary first, then fallbacks. A candidate is an alias (see `aliases`) or
+# {model: alias, effort: low|medium|high|xhigh | {4: .., 5: ..}, warn: true}. `warn` = the profile is at its limit for this cell.
+# `escalate:` = extra candidates reached only after failures (balanced can reach Opus this way).
+# Bands: c1-2, c3, c4-5. A model that is not configured, has no key, or is unsafe/unsuitable is skipped silently.
+# xhigh is accepted but sent as high (provider support for xhigh was not verified).
 
-modes:
+profiles:
+  free:     {offset: -1, ceiling: 3, max_usd_request: 0,    max_usd_day: 0,  allow_paid: false, allow_subscription: false, safety_net_on: [qwen], safety_net_off: [gfl]}
+  balanced: {offset:  0, ceiling: 4, max_usd_request: 0.10, max_usd_day: 3,  allow_paid: true,  allow_subscription: true,  safety_net_on: [gf],   safety_net_off: [gf, gfl], escalate_only_below_utilization: 0.5}
+  smart:    {offset:  1, ceiling: 5, max_usd_request: 1.50, max_usd_day: 15, allow_paid: true,  allow_subscription: true,  safety_net_on: [sn, sol], safety_net_off: [sn, sol]}
+
+# Added to the classified complexity (then clamped to 1-5).
+task_adjust: {architecture: 1, debug_if_c3plus: 1, qa: -1, explain_code: -1, risk: 1}
+
+# Cost multiplier for a subscription model by how much of its window is used (scarce = pricier = used less).
+scarcity: {below_50: 0.25, below_80: 0.6, above_80: 1.5}
+
+# Short names used in the tables -> model_name in config.yaml (claude-* / gpt-* get -cli or -api from CLAUDE_PRIMARY / OPENAI_PRIMARY).
+aliases:
+  op: claude-opus
+  sn: claude-sonnet
+  hk: claude-haiku-api      # Haiku through the API: through the CLI its fixed overhead is not worth a trivial task
+  sol: gpt-main
+  lu: gpt-mini
+  astra: gpt-max
+  gf: gemini-flash
+  fl: gemini-flash-lite
+  gp: gemini-pro
+  arg: gemini-argon
+  gfl: gemini-free-flash-lite
+  grk: grok
+  dsf: deepseek-flash
+  dsp: deepseek-pro
+  oss: pool-gpt-oss-120b
+  qwen: pool-qwen
+  cfl: pool-cf-llama
+  cfq: pool-cf-coder
+  cfg: pool-cf-glm
+  ogm: pool-gemma
+  ons: pool-nemotron-super
+  dsl: pool-deepseek
+  nem: pool-nemotron-ultra
+  mav: pool-maverick
+  cst: pool-codestral
+
+# Default reasoning effort when a candidate has none, by alias and band (omitted = leave the provider default).
+effort_default:
+  op:  {c3: medium, c4: medium, c5: high}
+  sn:  {c1-2: medium, c3: medium, c4: high, c5: high, light_tasks: [qa, doc_tech, writing], light: low}
+  sol: {c1-2: medium, c3: medium, c4: high, c5: xhigh}
+  hk:  {c1-2: low, c3: medium}
+  gf:  {c1-2: low, c3: medium, c4: high, c5: high}
+  fl:  {c1-2: low, c3: medium, c4: high, c5: high}
+  gp:  {c1-2: low, c3: medium, c4: high, c5: high}
+  arg: {c1-2: low, c3: medium, c4: high, c5: high}
+  grk: {c1-2: low, c3: medium, c4: high, c5: high}
+
+routes:
   free:
-    - {max_complexity: 2, model: free-pool-fast}
-    - {max_complexity: 5, model: free-pool-coding}
+    qa:
+      c1-2: [oss, qwen, cfl, nem]
+      c3: [qwen, ons, cfg, dsl]
+      c4-5: [ons, cfg, {model: qwen, warn: true}, dsl]
+    explain_code:
+      c1-2: [qwen, cfg, oss]
+      c3: [cfg, ons, qwen, dsl]
+      c4-5: [ons, {model: cfg, warn: true}, dsl]
+    codegen:
+      c1-2: [qwen, cfq, oss, cst]
+      c3: [cfg, qwen, cfq, dsl]
+      c4-5: [cfg, ons, {model: qwen, warn: true}, dsl]
+    feature:
+      c1-2: [qwen, cfg]
+      c3: [cfg, ons, qwen, dsl]
+      c4-5: [cfg, {model: ons, warn: true}, dsl]
+    frontend:
+      c1-2: [qwen, cfg]
+      c3: [cfg, qwen, dsl, mav]
+      c4-5: [cfg, {model: qwen, warn: true}, dsl]
+    refactor:
+      c1-2: [cfq, qwen, cfg, cst]
+      c3: [cfg, cfq, qwen, dsl]
+      c4-5: [cfg, {model: ons, warn: true}, dsl]
+    debug:
+      c1-2: [qwen, cfg, oss]
+      c3: [cfg, ons, qwen, dsl]
+      c4-5: [ons, {model: cfg, warn: true}, dsl, nem]
+    test_review:
+      c1-2: [qwen, cfq, cfg]
+      c3: [cfg, qwen, cfq, dsl]
+      c4-5: [cfg, {model: ons, warn: true}, dsl]
+    architecture:
+      c1-2: [qwen, ons, oss]
+      c3: [ons, cfg, qwen, nem]
+      c4-5: [ons, {model: cfg, warn: true}, dsl]
+    data:
+      c1-2: [qwen, oss, cfg]
+      c3: [cfg, qwen, ons, dsl]
+      c4-5: [ons, {model: cfg, warn: true}, dsl]
+    doc_tech:
+      c1-2: [qwen, cfl, ogm]
+      c3: [qwen, ogm, cfg]
+      c4-5: [ogm, cfg, qwen, gfl]
+    writing:
+      c1-2: [ogm, cfl, qwen, mav]
+      c3: [ogm, qwen, mav, gfl]
+      c4-5: [ogm, {model: cfl, warn: true}, gfl]
+    research_long:
+      c1-2: [ons, cfg, ogm, mav, gfl]
+      c3: [ons, cfg, ogm, mav, gfl]
+      c4-5: [ons, {model: cfg, warn: true}, mav, gfl]
+    mechanical:
+      c1-2: [qwen, oss, cfg]
   balanced:
-    - {max_complexity: 1, model: free-pool-fast}
-    - {max_complexity: 2, model: gemini-flash-lite}
-    - {max_complexity: 3, model: gemini-flash}
-    - {max_complexity: 4, model: claude-sonnet, effort: low}
-    - {max_complexity: 5, model: claude-sonnet, effort: medium}
+    qa:
+      c1-2: [fl, dsf, hk]
+      c3: [dsf, gf, hk]
+      c4-5: [gf, {model: sol, effort: medium}, {model: sn, effort: low}]
+    explain_code:
+      c1-2: [dsf, fl, hk]
+      c3: [gf, dsf, {model: sn, effort: medium}]
+      c4-5: [{model: sn, effort: medium}, gf, {model: sol, effort: medium}]
+    codegen:
+      c1-2: [dsf, hk, fl]
+      c3: [dsf, gf, {model: sn, effort: medium}]
+      c4-5: [{model: sn, effort: medium}, {model: sol, effort: high}, gf]
+    feature:
+      c1-2: [dsf, gf, {model: sn, effort: medium}]
+      c3: [{model: sn, effort: medium}, gf, dsf]
+      c4-5: [{model: sn, effort: high}, {model: sol, effort: high}, gf]
+      escalate: [{model: op, effort: medium}]
+    frontend:
+      c1-2: [dsf, gf, {model: sn, effort: medium}]
+      c3: [{model: sn, effort: medium}, gf, {model: sol, effort: medium}]
+      c4-5: [{model: sn, effort: high}, {model: sol, effort: high}, gf]
+    refactor:
+      c1-2: [dsf, hk, gf]
+      c3: [gf, dsf, {model: sn, effort: medium}]
+      c4-5: [{model: sn, effort: high}, {model: sol, effort: high}, gf]
+    debug:
+      c1-2: [dsf, gf, hk]
+      c3: [{model: sn, effort: medium}, gf, {model: sol, effort: medium}]
+      c4-5: [{model: sn, effort: high}, {model: sol, effort: high}, grk]
+      escalate: [{model: op, effort: medium}]
+    test_review:
+      c1-2: [dsf, hk, gf]
+      c3: [gf, grk, {model: sn, effort: medium}]
+      c4-5: [{model: sn, effort: high}, grk, {model: sol, effort: high}]
+    architecture:
+      c1-2: [gf, dsf, hk]
+      c3: [{model: sn, effort: medium}, {model: sol, effort: medium}, gf]
+      c4-5: [{model: sn, effort: high}, {model: sol, effort: high}, gf]
+      escalate: [{model: op, effort: medium}]
+    data:
+      c1-2: [dsf, fl, hk]
+      c3: [gf, dsf, {model: sol, effort: medium}]
+      c4-5: [{model: sol, effort: high}, {model: sn, effort: high}, gf]
+    doc_tech:
+      c1-2: [fl, dsf, hk]
+      c3: [gf, {model: sn, effort: low}, grk]
+      c4-5: [{model: sn, effort: medium}, {model: sol, effort: medium}, gf]
+    writing:
+      c1-2: [hk, gf, fl]
+      c3: [{model: sn, effort: low}, gp, gf]
+      c4-5: [{model: sn, effort: medium}, gp, {model: sol, effort: medium}]
+    research_long:
+      c1-2: [gf, fl, dsf]
+      c3: [gf, gp, dsf]
+      c4-5: [gp, gf, {model: sn, effort: medium}]
+    mechanical:
+      c1-2: [dsf, hk, fl]
   smart:
-    - {max_complexity: 1, model: claude-haiku}
-    - {max_complexity: 2, model: claude-sonnet, effort: low}
-    - {max_complexity: 3, model: claude-sonnet, effort: medium}
-    - {max_complexity: 4, model: claude-opus, effort: medium}
-    - {max_complexity: 5, model: claude-opus, effort: high}
+    qa:
+      c1-2: [hk, gf, {model: sn, effort: low}]
+      c3: [{model: sn, effort: low}, {model: sol, effort: medium}, gf]
+      c4-5: [{model: op, effort: medium}, {model: sol, effort: high}, {model: sn, effort: medium}]
+    explain_code:
+      c1-2: [{model: sn, effort: low}, gf, {model: sol, effort: medium}]
+      c3: [{model: sn, effort: medium}, {model: sol, effort: medium}, gf]
+      c4-5: [{model: op, effort: medium}, {model: sn, effort: high}, {model: sol, effort: high}]
+    codegen:
+      c1-2: [{model: sn, effort: medium}, {model: sol, effort: medium}, gf]
+      c3: [{model: sn, effort: medium}, {model: sol, effort: high}, gf, dsf]
+      c4-5: [{model: op, effort: medium}, {model: sol, effort: xhigh}, {model: sn, effort: high}]
+    feature:
+      c1-2: [{model: sn, effort: medium}, {model: sol, effort: medium}, gf]
+      c3: [{model: sn, effort: high}, {model: sol, effort: high}, {model: op, effort: medium}]
+      c4-5: [{model: op, effort: {4: medium, 5: high}}, {model: sol, effort: xhigh}, {model: sn, effort: high}]
+    frontend:
+      c1-2: [{model: sn, effort: medium}, {model: sol, effort: medium}, gf]
+      c3: [{model: sn, effort: high}, {model: sol, effort: high}, {model: op, effort: medium}]
+      c4-5: [{model: op, effort: medium}, {model: sn, effort: high}, {model: sol, effort: xhigh}]
+    refactor:
+      c1-2: [{model: sn, effort: medium}, {model: sol, effort: medium}, gf]
+      c3: [{model: sn, effort: high}, {model: sol, effort: high}, {model: op, effort: medium}]
+      c4-5: [{model: op, effort: high}, {model: sol, effort: xhigh}, {model: sn, effort: high}]
+    debug:
+      c1-2: [{model: sn, effort: medium}, {model: sol, effort: medium}, gf]
+      c3: [{model: op, effort: medium}, {model: sn, effort: high}, {model: sol, effort: high}]
+      c4-5: [{model: op, effort: high}, {model: sol, effort: xhigh}, {model: sn, effort: high}]
+    test_review:
+      c1-2: [{model: sn, effort: medium}, grk, {model: sol, effort: medium}]
+      c3: [{model: op, effort: medium}, {model: sn, effort: high}, grk]
+      c4-5: [{model: op, effort: high}, {model: sol, effort: xhigh}, grk]
+    architecture:
+      c1-2: [{model: sn, effort: medium}, {model: sol, effort: medium}, gf]
+      c3: [{model: op, effort: medium}, {model: sol, effort: high}, arg]
+      c4-5: [{model: op, effort: high}, {model: sol, effort: xhigh}, arg]
+    data:
+      c1-2: [{model: sol, effort: medium}, {model: sn, effort: medium}, gf]
+      c3: [{model: sol, effort: high}, {model: op, effort: medium}, {model: sn, effort: high}]
+      c4-5: [{model: op, effort: medium}, {model: sol, effort: xhigh}, arg]
+    doc_tech:
+      c1-2: [{model: sn, effort: low}, {model: sol, effort: medium}, gf]
+      c3: [{model: sn, effort: medium}, {model: op, effort: medium}, {model: sol, effort: medium}]
+      c4-5: [{model: op, effort: medium}, {model: sn, effort: high}, {model: sol, effort: high}]
+    writing:
+      c1-2: [{model: sn, effort: medium}, gp, {model: sol, effort: medium}]
+      c3: [{model: op, effort: medium}, {model: sn, effort: medium}, gp]
+      c4-5: [{model: op, effort: high}, gp, {model: sn, effort: high}]
+    research_long:
+      c1-2: [gf, {model: sn, effort: medium}, gp]
+      c3: [gp, {model: op, effort: medium}, arg]
+      c4-5: [{model: op, effort: medium}, arg, gp]
+    mechanical:
+      c1-2: [hk, {model: sn, effort: low}, gf]
 
-# Pins: force a model for ONE turn from the message itself.  Syntax (case-insensitive):  !opus   model:opus
-# and, for names with natural: true, a phrase near the start or end such as "using Opus" / "usando o Opus" / "com o Opus".
-# `model` is a model_name from config.yaml (claude-* gets -cli/-api appended).  auto-free ignores pins to paid models.
+# Pins: force a model for ONE turn from the message itself.  Syntax (case-insensitive), at the start of a line or after a space:
+#   !opus   model:opus     and, for names with natural: true, a short sentence such as "using Opus" / "usando o Opus".
+# `model` is a model_name from config.yaml (claude-* / gpt-* get -cli/-api appended). A pin never overrides safety: a pin to a model that
+# SAFETY_MODE or sensitive content forbids is ignored and the footer says so; auto-free ignores pins to paid models.
 pins:
   opus:     {model: claude-opus,   effort: high,   natural: true}
   sonnet:   {model: claude-sonnet, effort: medium, natural: true}
   haiku:    {model: claude-haiku,                  natural: true}
+  sol:      {model: gpt-main,  effort: high}
+  luna:     {model: gpt-mini}
+  astra:    {model: gpt-max,   effort: medium}
   pro:      {model: gemini-pro,    effort: high}
   flash:    {model: gemini-flash}
   lite:     {model: gemini-flash-lite}
-  deepseek: {model: pool-deepseek,       natural: true}
-  gpt-oss:  {model: pool-gpt-oss-120b,   natural: true}
+  argon:    {model: gemini-argon}
+  grok:     {model: grok, effort: medium}
+  deepseek: {model: deepseek-flash, natural: true}
+  dspro:    {model: deepseek-pro}
+  deepseek-free: {model: pool-deepseek}
+  qwen:     {model: pool-qwen}
+  oss:      {model: pool-gpt-oss-120b, natural: true}
+  gpt-oss:  {model: pool-gpt-oss-120b, natural: true}
   nemotron: {model: pool-nemotron-ultra, natural: true}
   free:     {model: free-pool-coding}
   gpt:      {model: gpt-main,  effort: medium, natural: true}

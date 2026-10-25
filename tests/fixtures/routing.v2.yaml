@@ -1,4 +1,3 @@
-# Profile D: free providers only (auto-balanced and auto-smart degrade to the free pool)
 # mode -> ordered tiers. First tier with complexity <= max_complexity wins.
 # effort: low|medium|high -> sent as reasoning_effort (LiteLLM maps it per provider).
 # task_bump adds to the classified complexity (e.g. planning is harder than it looks).
@@ -11,9 +10,21 @@ task_bump:
   explain: -1
 
 modes:
-  free:     [{max_complexity: 2, model: free-pool-fast}, {max_complexity: 5, model: free-pool-coding}]
-  balanced: [{max_complexity: 2, model: free-pool-fast}, {max_complexity: 5, model: free-pool-coding}]
-  smart:    [{max_complexity: 5, model: free-pool-coding}]
+  free:
+    - {max_complexity: 2, model: free-pool-fast}
+    - {max_complexity: 5, model: free-pool-coding}
+  balanced:
+    - {max_complexity: 1, model: free-pool-fast}
+    - {max_complexity: 2, model: gemini-flash-lite}
+    - {max_complexity: 3, model: gemini-flash}
+    - {max_complexity: 4, model: claude-sonnet, effort: low}
+    - {max_complexity: 5, model: claude-sonnet, effort: medium}
+  smart:
+    - {max_complexity: 1, model: claude-haiku}
+    - {max_complexity: 2, model: claude-sonnet, effort: low}
+    - {max_complexity: 3, model: claude-sonnet, effort: medium}
+    - {max_complexity: 4, model: claude-opus, effort: medium}
+    - {max_complexity: 5, model: claude-opus, effort: high}
 
 # Pins: force a model for ONE turn from the message itself.  Syntax (case-insensitive):  !opus   model:opus
 # and, for names with natural: true, a phrase near the start or end such as "using Opus" / "usando o Opus" / "com o Opus".

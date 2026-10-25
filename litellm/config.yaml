@@ -29,6 +29,14 @@ model_list:
   - {model_name: pool-gpt-oss-120b,   litellm_params: {model: openai/groq/openai/gpt-oss-120b, api_base: os.environ/FREE_POOL_BASE, api_key: os.environ/FREE_POOL_KEY, timeout: 30, num_retries: 0}}
   - {model_name: pool-nemotron-ultra, litellm_params: {model: openai/nvidia/nvidia/nemotron-3-ultra-550b-a55b, api_base: os.environ/FREE_POOL_BASE, api_key: os.environ/FREE_POOL_KEY, timeout: 30, num_retries: 0}}
 
+  # --- routing v3 single pool models (ids probed through OmniRoute on 2026-10-25; data/pool-members.json says which are live) ---
+  - {model_name: pool-qwen, litellm_params: {model: openai/groq/qwen/qwen3.8-27b, api_base: os.environ/FREE_POOL_BASE, api_key: os.environ/FREE_POOL_KEY, timeout: 30, num_retries: 0}}
+  - {model_name: pool-cf-llama, litellm_params: {model: openai/cloudflare-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast, api_base: os.environ/FREE_POOL_BASE, api_key: os.environ/FREE_POOL_KEY, timeout: 30, num_retries: 0}}
+  - {model_name: pool-cf-coder, litellm_params: {model: openai/cloudflare-ai/@cf/qwen/qwen2.5-coder-32b-instruct, api_base: os.environ/FREE_POOL_BASE, api_key: os.environ/FREE_POOL_KEY, timeout: 30, num_retries: 0}}
+  - {model_name: pool-cf-glm, litellm_params: {model: openai/cloudflare-ai/@cf/zai-org/glm-4.7-flash, api_base: os.environ/FREE_POOL_BASE, api_key: os.environ/FREE_POOL_KEY, timeout: 30, num_retries: 0}}
+  - {model_name: pool-gemma, litellm_params: {model: openai/ollama-cloud/gemma4:31b, api_base: os.environ/FREE_POOL_BASE, api_key: os.environ/FREE_POOL_KEY, timeout: 30, num_retries: 0}}
+  - {model_name: pool-nemotron-super, litellm_params: {model: openai/ollama-cloud/nemotron-3-super, api_base: os.environ/FREE_POOL_BASE, api_key: os.environ/FREE_POOL_KEY, timeout: 30, num_retries: 0}}
+
   # --- Gemini ---
   - model_name: gemini-flash-lite
     litellm_params: {model: gemini/gemini-3.5-flash-lite, api_key: os.environ/GEMINI_API_KEY}
@@ -86,6 +94,12 @@ router_settings:
     - {pool-deepseek: [free-pool-coding]}
     - {pool-gpt-oss-120b: [free-pool-coding]}
     - {pool-nemotron-ultra: [free-pool-coding]}
+    - {pool-qwen: [free-pool-coding]}
+    - {pool-cf-llama: [free-pool-coding]}
+    - {pool-cf-coder: [free-pool-coding]}
+    - {pool-cf-glm: [free-pool-coding]}
+    - {pool-gemma: [free-pool-coding]}
+    - {pool-nemotron-super: [free-pool-coding]}
     - {gemini-flash: [claude-haiku-cli, claude-haiku-api]}
     - {gemini-pro: [claude-sonnet-cli, claude-sonnet-api]}
     - {claude-haiku-cli: [claude-haiku-api, gemini-flash-lite]}
