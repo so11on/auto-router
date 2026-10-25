@@ -2,7 +2,7 @@
   "name": "auto-router-companion",
   "displayName": "auto-router companion",
   "description": "Status bar for auto-router (model, context %, quota) and automatic continuation in a new chat when the context is nearly full.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "local",
   "license": "MIT",
   

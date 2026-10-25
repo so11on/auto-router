@@ -1,8 +1,9 @@
 """LiteLLM hook for auto-router: resolves auto-free / auto-balanced / auto-smart.
 
-Pre-call: classifies new user turns and, inside agent tasks, re-evaluates at checkpoints
-(policy.py: up on failure signals or harder steps, down with hysteresis), then adjusts for quota
-(quota.py) and context window (context.py, registry.py), compacts the history when it would not fit,
+Pre-call: runs the DLP (dlp.py), classifies new user turns and, inside agent tasks, re-evaluates at checkpoints
+(policy.py: up on failure signals or harder steps, down with hysteresis). engine.route() picks the model from the tables in
+routing.yaml (safety, sensitivity, availability, tools, vision, context, quota, budget, quality floor, cost); the hook compacts the
+history when it would not fit (context.py),
 keeps a session memory file in the project (written by claude-bridge) and publishes
 data/context-state.json for the VS Code companion (status bar, automatic new chat).
 
@@ -28,6 +29,7 @@ from litellm.integrations.custom_logger import CustomLogger
 
 import context as ctxmod
 import dlp
+import engine
 import policy
 import pool
 import registry
@@ -53,8 +55,6 @@ EVENT_FILE = os.environ.get("EVENT_LOG", "/app/data/router.jsonl")
 MAX_LOG_BYTES = 10_000_000
 MAX_CONTINUATIONS = 3
 FREE_FALLBACK_MODEL = "gemini-free-flash-lite"
-# last resorts after the profile ladder; each is still filtered by safety / sensitivity / profile per request
-FALLBACK_TAIL = {"free": ["gemini-free-flash-lite"], "balanced": ["gemini-flash"], "smart": ["gemini-pro"]}
 CLASSIFIER_MAX_CHARS = int(os.environ.get("CLASSIFIER_MAX_CHARS", "4000"))
 SHOW_FOOTER = os.environ.get("AUTO_ROUTER_FOOTER", "true").lower() == "true"
 DATA_DIR = os.path.dirname(USAGE_FILE)
@@ -64,10 +64,11 @@ BRIDGE_KEY = os.environ.get("BRIDGE_KEY", "")
 DEFAULT_CONTEXT = {"client_budget": 100000, "output_reserve": 8000, "memory_at": 0.60, "new_chat_at": 0.85,
                    "compact_at": 0.90, "keep_user_turns": 2, "memory_every_messages": 12}
 CHECKPOINT_PROMPT = (
-    "You are judging an AI coding agent in the middle of a task. Given the original request and the latest steps, "
-    "classify the NEXT steps. " + 'Reply with JSON only: {"task": one of explain|codegen|debug|refactor|plan|research, '
-    '"complexity": integer 1-5}. 1 = mechanical (apply known edits, read files); 3 = normal coding; '
-    "5 = hard debugging, design decisions or repeated failures."
+    "Você avalia um agente de código no meio de uma tarefa. Dado o pedido original e os últimos passos, classifique os PRÓXIMOS passos. "
+    'Responda só JSON: {"task": um de qa|explain_code|codegen|feature|frontend|refactor|debug|test_review|architecture|data|doc_tech|writing|'
+    'research_long|mechanical, "complexity": 1-5, "risk": true|false, "long_output": true|false}. '
+    "mechanical = passo já decidido (aplicar edições conhecidas, ler arquivos, rodar comandos). "
+    "1 = trivial; 3 = mudança em várias etapas numa área; 5 = desenho transversal, debug difícil ou falhas repetidas."
 )
 SUMMARY_PROMPT = (
     "Summarize this part of a coding conversation for another AI that will continue it. Keep: the goal, decisions and "
@@ -76,14 +77,15 @@ SUMMARY_PROMPT = (
 )
 
 VIRTUAL = {"auto-free": "free", "auto-balanced": "balanced", "auto-smart": "smart"}
-TASKS = ("explain", "codegen", "debug", "refactor", "plan", "research")
+TASKS = engine.TASKS
 
 CLASSIFIER_PROMPT = (
-    "Classify the user's latest request for a coding assistant. "
-    'Reply with JSON only: {"task": one of explain|codegen|debug|refactor|plan|research, '
-    '"complexity": integer 1-5}. '
-    "Complexity 1 = trivial lookup or small edit; 3 = multi-step change in one area; "
-    "5 = cross-cutting design, hard debugging or large refactor."
+    "Classifique o pedido para um assistente de produto e código. "
+    'Responda só JSON: {"task": um de qa|explain_code|codegen|feature|frontend|refactor|debug|test_review|architecture|data|doc_tech|writing|'
+    'research_long, "complexity": 1-5, '
+    '"risk": true se envolver produção, migração de banco, pagamentos, segurança ou dados pessoais, '
+    '"long_output": true se pedir texto longo}. '
+    "1 = trivial; 3 = mudança em várias etapas numa área; 5 = desenho transversal, debug difícil ou refatoração grande."
 )
 
 _sticky: dict = {}  # conv key -> (conversation state dict, ts)
@@ -227,20 +229,31 @@ def _load_routing() -> dict:
         return yaml.safe_load(f)
 
 
+_HEURISTIC_WORDS = (
+    ("debug", ("bug", "error", "traceback", "fails", "failing", "erro", "falha", "exception", "não funciona")),
+    ("test_review", ("test", "teste", "review", "revis")),
+    ("refactor", ("refactor", "refator", "rename", "cleanup", "migrat", "migr")),
+    ("architecture", ("architecture", "arquitetura", "design", "planej", "plano técnico", "adr")),
+    ("frontend", ("css", "layout", "component", "componente", "tela", "ui ", "botão", "button")),
+    ("data", ("sql", "pandas", "query", "dataframe", "estatíst", "notebook")),
+    ("doc_tech", ("readme", "spec", "prd", "user story", "documentação", "documentacao")),
+    ("writing", ("e-mail", "email", "post", "pitch", "copy", "texto para")),
+    ("feature", ("feature", "funcionalidade", "implement", "implemente")),
+    ("codegen", ("create", "add ", "write", "crie", "função", "function", "script", "regex")),
+    ("research_long", ("todos os arquivos", "all files", "repositório inteiro", "whole repo")),
+)
+
+
 def _heuristic(text: str) -> dict:
+    """Local, free classification (also used when no model may see the text)."""
     t = text.lower()
-    task = "explain"
-    for name, words in (
-        ("debug", ("bug", "error", "traceback", "fails", "erro", "falha")),
-        ("refactor", ("refactor", "refator", "rename", "cleanup")),
-        ("plan", ("plan", "design", "architecture", "planej", "arquitetura")),
-        ("codegen", ("implement", "create", "add ", "write", "crie", "implemente")),
-    ):
+    task = "qa"
+    for name, words in _HEURISTIC_WORDS:
         if any(w in t for w in words):
             task = name
             break
     complexity = 1 if len(text) < 200 else 2 if len(text) < 800 else 3
-    return {"task": task, "complexity": complexity, "source": "heuristic"}
+    return {"task": task, "complexity": complexity, "risk": False, "long_output": False, "source": "heuristic"}
 
 
 def _classifier_privacy() -> str:
@@ -288,12 +301,13 @@ async def _classify(text: str, mode: str = "balanced", checkpoint: bool = False,
     s = s or safety.settings()
     try:
         r = await _llm_json(_internal_route(mode, s, sensitive), CHECKPOINT_PROMPT if checkpoint else CLASSIFIER_PROMPT,
-                            text[:CLASSIFIER_MAX_CHARS], 60)
+                            text[:CLASSIFIER_MAX_CHARS], 80)
         raw = r.choices[0].message.content or ""
         out = json.loads(raw[raw.find("{"):raw.rfind("}") + 1])
-        task = out.get("task") if out.get("task") in TASKS else "explain"
+        task = out.get("task") if out.get("task") in TASKS and (checkpoint or out.get("task") != "mechanical") else "qa"
         complexity = max(1, min(5, int(out.get("complexity", 3))))
-        return {"task": task, "complexity": complexity, "source": "checkpoint" if checkpoint else "llm"}
+        return {"task": task, "complexity": complexity, "risk": bool(out.get("risk")), "long_output": bool(out.get("long_output")),
+                "source": "checkpoint" if checkpoint else "llm"}
     except Exception:
         return _heuristic(text)
 
@@ -425,6 +439,11 @@ def _footer(request_data: dict, served_by: str, failed_over: list) -> str:
         if route.get("pin_note"):
             parts.append(route["pin_note"])
         parts.append(f"{route.get('task')} c{route.get('complexity')}" + (f" {route.get('effort')}" if route.get("effort") else ""))
+    parts.append(f"🔒 safety {route.get('safety_mode', 'on')}")
+    if route.get("warn"):
+        parts.append("⚠ perfil no limite: para algo melhor use Auto: Balanced/Smart")
+    if route.get("below"):
+        parts.append("⚠ abaixo do recomendado para esta tarefa")
     if route.get("sensitive"):
         kinds = (route.get("dlp") or {}).get("kinds") or {}
         parts.append("🔒 sensível" + (f" ({', '.join(sorted(kinds))})" if kinds else "") + ": só modelos permitidos")
@@ -497,6 +516,91 @@ def _blocked_message(sensitive: bool, kinds: dict, mode: str) -> str:
             "Rode `node ar.mjs omniroute` (pool gratuito seguro), use Auto: Balanced/Smart, ou `node ar.mjs safety off`.")
 
 
+# ---------- routing v3 glue: availability, spend, calling the engine ----------
+SPEND_FILE = os.path.join(DATA_DIR, "spend.json")
+_routing_ok = {"mtime": None}
+
+
+def _pool_ids() -> set:
+    return {m.get("id") for members in safety.pool_members().values() for m in members}
+
+
+def _available(name: str) -> bool:
+    """Configured in the running gateway AND its key is set AND (pool models) verified by `ar.mjs omniroute`."""
+    if not _configured(name):
+        return False
+    spec = registry.spec(name)
+    need = spec.get("needs")
+    if need and not os.environ.get(need):
+        return False
+    if spec.get("needs_pool"):
+        if not FREE_POOL_ENABLED:
+            return False
+        omni = spec.get("omni")
+        if omni and omni not in _pool_ids():
+            return False
+    return True
+
+
+def _spent_today() -> float:
+    try:
+        with open(SPEND_FILE) as f:
+            d = json.load(f)
+        return float(d["usd"]) if d.get("day") == time.strftime("%Y-%m-%d", time.gmtime()) else 0.0
+    except Exception:
+        return 0.0
+
+
+def _spend_add(usd: float) -> None:
+    if not usd or usd <= 0:
+        return
+    try:
+        tmp = SPEND_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"day": time.strftime("%Y-%m-%d", time.gmtime()), "usd": round(_spent_today() + usd, 6)}, f)
+        os.replace(tmp, SPEND_FILE)
+    except Exception:
+        pass
+
+
+def _engine_env(s: dict, sensitive: bool, kinds: dict):
+    return engine.Env(settings=s, sensitive=sensitive, kinds=kinds, resolve=_resolve, available=_available,
+                      health=lambda n: "exhausted" if _pool_open(n) else _quota.status(n)["state"],
+                      utilization=lambda n: _quota.status(n).get("utilization"), spent_today=_spent_today())
+
+
+def _has_image(messages: list) -> bool:
+    for m in messages:
+        c = m.get("content")
+        if isinstance(c, list) and any(isinstance(p, dict) and (p.get("type") in ("image_url", "input_image", "image") or "image_url" in p) for p in c):
+            return True
+    return False
+
+
+def _blocked_http(e, mode: str, s: dict, sensitive: bool, kinds: dict):
+    if not sensitive and mode == "free":
+        if _breaker.is_open():
+            return HTTPException(status_code=503, detail=POOL_DOWN_MESSAGE)
+        if s["safety_mode"] == "on" and not safety.pool_members():
+            return HTTPException(status_code=400, detail=_blocked_message(False, kinds, mode))
+    return HTTPException(status_code=400, detail=str(e))
+
+
+def _check_routing(routing: dict) -> None:
+    if "routes" not in routing:
+        raise HTTPException(status_code=500, detail="routing.yaml está no formato antigo (v2): rode `node ar.mjs update --apply`.")
+    try:
+        mt = os.path.getmtime(ROUTING_FILE)
+    except OSError:
+        mt = None
+    if _routing_ok["mtime"] == mt and mt is not None:
+        return
+    errs = engine.validate(routing)
+    if errs:
+        raise HTTPException(status_code=500, detail="routing.yaml inválido: " + "; ".join(errs[:5]))
+    _routing_ok["mtime"] = mt
+
+
 # ---------- quota, context state, memory ----------
 def _resolve(name: str) -> str:
     if name.startswith("claude-") and not name.endswith(("-cli", "-api")):
@@ -525,7 +629,7 @@ POOL_DOWN_MESSAGE = "O pool gratuito está indisponível. Tente de novo em algun
 
 
 def _pool_open(name: str) -> bool:
-    return pool.Breaker.covers(name) and _breaker.is_open()
+    return (pool.Breaker.covers(name) or registry.spec(name).get("via") == "omniroute") and _breaker.is_open()
 
 
 def _track_quota(kwargs: dict, response_obj, ok: bool) -> None:
@@ -537,7 +641,7 @@ def _track_quota(kwargs: dict, response_obj, ok: bool) -> None:
         group = slo.get("model_group") or meta.get("model_group") or kwargs.get("model")
         err = str(kwargs.get("exception") or slo.get("error_str") or "")
         _quota.record_call(group, slo.get("total_tokens") or 0, ok, err)
-        if pool.Breaker.covers(group):
+        if pool.Breaker.covers(group) or registry.spec(group).get("via") == "omniroute":
             _breaker.record(ok, err)
     except Exception:
         pass
@@ -776,69 +880,109 @@ class AutoRouter(CustomLogger):
             st.update(last_eval_step=0, switch_step=0, pinned=False)
         st["steps_since_switch"] = sig["steps"] - st.get("switch_step", 0)
 
-        # ---- 1. which model (pin, sticky, or (re)classify with hysteresis) ----
+        # ---- 1. which model: pin, or classify -> engine.route() with hysteresis ----
+        _check_routing(routing)
+        tokens = ctxmod.count_tokens(messages, data.get("tools"))
+        client_tokens = tokens  # what the editor is holding; compaction below only shrinks what the model receives
+        env = _engine_env(s, sensitive, dres.kinds)
+        rneed = engine.Need(tools=bool(data.get("tools")), vision=bool(dres.has_image or _has_image(messages)), ctx_tokens=tokens)
+        cur = st.get("model")
         source, reason, pin_note, switched = "sticky", "", None, False
+
+        def unpin(why):
+            nonlocal pin, pin_note
+            pin_note = why
+            if pin[2]:
+                last["content"] = _remove_text(last["content"], pin[2])
+            pin = None
+
         pin = _find_pin(_text(last.get("content")), routing.get("pins", {})) if new_user_turn else None
-        if pin and not _configured(_resolve(pin[1]["model"])):
-            pin_note = f"ignored: {pin[0]} is not configured on this install"
-            if pin[2]:
-                last["content"] = _remove_text(last["content"], pin[2])
-            pin = None
-        if pin and not _model_allowed(_resolve(pin[1]["model"]), s, sensitive, None):
-            pin_note = f"ignored: {pin[0]} is not allowed by the safety settings" + (" for sensitive content" if sensitive else "")
-            if pin[2]:
-                last["content"] = _remove_text(last["content"], pin[2])
-            pin = None
-        if pin and mode == "free" and not _is_free_model(pin[1]["model"]):
-            pin_note = f"ignored: auto-free never uses paid models ({pin[0]})"
-            if pin[2]:
-                last["content"] = _remove_text(last["content"], pin[2])
-            pin = None
+        if pin:
+            pm = _resolve(pin[1]["model"])
+            if not _configured(pm) or not _available(pm):
+                unpin(f"ignored: {pin[0]} is not available on this install")
+            elif not _model_allowed(pm, s, sensitive, None):
+                unpin(f"ignored: {pin[0]} is not allowed by the safety settings" + (" for sensitive content" if sensitive else ""))
+            elif mode == "free" and not _is_free_model(pin[1]["model"]):
+                unpin(f"ignored: auto-free never uses paid models ({pin[0]})")
+            elif _pool_open(pm):
+                unpin(f"ignored: {pin[0]} is on the free pool, which is unhealthy right now")
+
+        def go(cls, **kw):
+            try:
+                return engine.route(routing, mode, cls["task"], cls["complexity"], env, rneed, risk=bool(cls.get("risk")), **kw)
+            except engine.RouteBlocked as err:
+                _event("blocked", rid=rid, mode=mode, sensitive=sensitive, kinds=dres.kinds, reason=err.reason)
+                raise _blocked_http(err, mode, s, sensitive, dres.kinds)
+
         if pin:
             alias, spec, matched = pin
             if matched:  # remove the "!opus" token so the model never sees it
                 last["content"] = _remove_text(last["content"], matched)
-            decision = {"model": spec["model"], "effort": spec.get("effort"), "task": "pinned", "complexity": 1,
-                        "pinned": alias}
-            st["pinned"], source, reason = True, "pinned", f"pinned: {alias}"
-            switched = bool(st.get("decision")) and st["decision"]["model"] != decision["model"]
-        elif st.get("decision") and not new_user_turn and (st.get("pinned") or not policy.needs_checkpoint(st, sig, cfg)):
-            decision = st["decision"]
-        else:
-            checkpoint = not new_user_turn
-            text = _checkpoint_text(messages, first_user) if checkpoint else _text(last.get("content"))
-            cls = await _classify(text, mode, checkpoint=checkpoint, s=s, sensitive=sensitive)
-            source = cls.get("source", "llm")
-            target = policy.pick(routing, mode, cls["task"], cls["complexity"])
-            decision, reason, switched = policy.decide(routing, mode, st, target, sig, new_user_turn, cfg)
-            st["last_eval_step"] = sig["steps"]
-
-        # ---- 2. quota and context window ----
-        tokens = ctxmod.count_tokens(messages, data.get("tools"))
-        client_tokens = tokens  # what the editor is holding; compaction below only shrinks what the model receives
-        need = tokens + ccfg["output_reserve"]
-        health = lambda m: "exhausted" if _pool_open(m) else _quota.status(m)["state"]
-        fits = lambda m: need <= registry.context_window(m) * ccfg["compact_at"]
-        adj_reason = None
-        if not decision.get("pinned"):
-            before = decision["model"]
+            pm = _resolve(spec["model"])
             try:
-                decision, adj_reason = policy.adjust(routing, mode, decision, health, fits, _resolve,
-                                                     allowed=lambda n: _model_allowed(n, s, sensitive, mode))
-            except policy.Blocked:
-                _event("blocked", rid=rid, mode=mode, sensitive=sensitive, kinds=dres.kinds)
-                raise HTTPException(status_code=400, detail=_blocked_message(sensitive, dres.kinds, mode))
-            if decision["model"] != before:
-                switched = True
-        if _pool_open(_resolve(decision["model"])):
-            # the pool is down: never wait for its timeout and never escape to a paid / unsafe model by accident
-            alt = next((n for n in FALLBACK_TAIL.get(mode, []) if _configured(n) and not _pool_open(n)
-                        and _model_allowed(n, s, sensitive, mode)), None)
-            if alt is None:
-                _event("blocked", rid=rid, mode=mode, sensitive=sensitive, kinds=dres.kinds, pool=_breaker.status())
-                raise HTTPException(status_code=503, detail=POOL_DOWN_MESSAGE)
-            decision = {**decision, "model": alt}
-            adj_reason, switched = "pool unhealthy", True
+                fb = engine.route(routing, mode, "qa", 3, env, rneed).fallbacks
+            except engine.RouteBlocked:
+                fb = []
+            decision = {"model": pm, "effort": spec.get("effort"), "task": "pinned", "complexity": 1, "pinned": alias,
+                        "fallbacks": [x for x in fb if x != pm]}
+            st["pinned"], source, reason = True, "pinned", f"pinned: {alias}"
+            switched = bool(cur) and cur != pm
+        elif st.get("pinned") and st.get("decision") and not new_user_turn and _model_allowed(st["decision"]["model"], s, sensitive, None):
+            decision = st["decision"]  # a pin lasts for the turn, tool steps included
+        else:
+            if st.get("pinned") and not new_user_turn:
+                reason = "sensitive content: pin dropped"
+            st["pinned"] = False
+            utext = _request_text(_text(last.get("content"))) if new_user_turn else ""
+            reuse = bool(st.get("cls") and cur and not new_user_turn and not policy.needs_checkpoint(st, sig, cfg))
+            esc = policy.failing(sig) and not new_user_turn
+            if reuse:
+                cls = st["cls"]
+                d = go(cls, prefer=cur)
+                reason = reason or ("filters changed the choice" if d.model != cur else "unchanged")
+            else:
+                checkpoint = not new_user_turn
+                text = _checkpoint_text(messages, first_user) if checkpoint else utext
+                if new_user_turn and rneed.vision:
+                    text += "\n[imagem anexada]"
+                cls = await _classify(text, mode, checkpoint=checkpoint, s=s, sensitive=sensitive)
+                source = cls.get("source", "llm")
+                if new_user_turn and len(utext) < 200 and st.get("band"):  # a short message does not drop below the previous band
+                    floor_c = engine.band_floor(st["band"])
+                    while cls["complexity"] < 5 and engine.adjust_complexity(cls["task"], cls["complexity"], bool(cls.get("risk")), routing) < floor_c:
+                        cls = {**cls, "complexity": cls["complexity"] + 1}
+                st["last_eval_step"] = sig["steps"]
+                if esc:
+                    d = go(cls, escalate=True, avoid_vendor=registry.spec(cur).get("vendor") if cur else None)
+                    reason = "tool errors" if sig["consecutive_errors"] >= 2 else "tool-call loop"
+                else:
+                    keep = go(cls, prefer=cur) if cur else None
+                    target = go(cls)
+                    if not cur:
+                        d, reason = target, "first decision"
+                    elif keep.model != cur:
+                        d, reason = target, "filters changed the choice"
+                    elif target.model == cur:
+                        d, reason = keep, "unchanged"
+                    else:
+                        up = engine.direction(env, cur, target.model, target.task, rneed) >= 0
+                        ok_mech = target.task != "mechanical" or engine.switch_saving_ok(env, cur, target.model, target.task, rneed)
+                        if up:
+                            d, reason = target, "harder or better-suited next steps"
+                        elif ok_mech and policy.downgrade_allowed(st, sig, new_user_turn, cfg):
+                            d, reason = target, "new request is simpler" if new_user_turn else "simpler next steps"
+                        else:
+                            d, reason = keep, f"downgrade pending ({st.get('down_votes', 0)}/{cfg['downgrade_confirmations']})"
+                st["cls"] = cls
+            decision = {"model": d.model, "effort": d.effort, "task": d.task, "complexity": d.complexity, "band": d.band,
+                        "fallbacks": d.fallbacks, "warn": d.warn, "below": d.below, "est_cost": d.est_cost, "engine": d.public()}
+            st["band"] = d.band
+            switched = bool(cur) and cur != d.model
+
+        # ---- 2. context window of the chosen model ----
+        need = tokens + ccfg["output_reserve"]
+        adj_reason = None
         model = _resolve(decision["model"])
         window = registry.context_window(model)
         compacted = False
@@ -859,7 +1003,7 @@ class AutoRouter(CustomLogger):
             st["switch_step"] = sig["steps"]
             _event("switch", rid=rid, session=key[:12], frm=prev_model, to=model, reason=adj_reason or reason,
                    step=sig["steps"], new_user_turn=new_user_turn)
-        st.update(decision=decision, trail=trail[-12:])
+        st.update(decision=decision, model=model, trail=trail[-12:])
         _sticky[key] = (st, now)
         handoff = bool(prev_model and prev_model != model)
         if handoff:
@@ -867,13 +1011,11 @@ class AutoRouter(CustomLogger):
         data["model"] = model
         if decision.get("effort"):
             _apply_effort(data, str(call_type), model, decision["effort"])
-        # per-request fallbacks: only models this request may reach (safety, sensitivity, profile), never the static list
-        chain, seen = [], {model}
-        for n in [_resolve(m) for m in policy.ladder(routing, mode)] + list(FALLBACK_TAIL.get(mode, [])):
-            if n not in seen and _configured(n) and not _pool_open(n) and _model_allowed(n, s, sensitive, mode):
-                seen.add(n)
-                chain.append(n)
+        # per-request fallbacks: the rest of the engine's already-filtered list (safety, sensitivity, profile, tools, context)
+        chain = [x for x in (decision.get("fallbacks") or []) if x != model]
         data["fallbacks"] = chain
+        if not decision.get("pinned"):
+            _spend_add(decision.get("est_cost") or 0)
 
         quota_now = _quota.status(model)
         # The chat's fullness is judged on the editor's side (its whole history vs the budget it was given), not on the
@@ -883,14 +1025,16 @@ class AutoRouter(CustomLogger):
         state_row = {"updated": time.time(), "session": key[:12], "mode": mode, "model": model, "trail": trail[-12:],
                      "ctx_tokens": client_tokens, "ctx_window": eff_window, "ctx_pct": pct, "model_tokens": tokens,
                      "model_window": window, "quota": quota_now,
-                     "compacted": compacted, "action": "none"}
+                     "compacted": compacted, "action": "none", "safety_mode": s["safety_mode"], "sensitive": sensitive}
         data.setdefault("metadata", {})["auto_router"] = {
             "rid": rid, "t0": t0, "requested": f"auto-{mode}", "mode": mode,
             "task": decision["task"], "complexity": decision["complexity"], "model": model,
             "effort": decision.get("effort"), "pinned": decision.get("pinned"), "pin_note": pin_note,
             "ctx_pct": pct, "quota": quota_now.get("state"), "quota_info": quota_now,
             "switch": (adj_reason or reason) if handoff else None, "compacted": compacted,
-            "sensitive": sensitive, "dlp": dres.public(), "fallbacks": chain,
+            "sensitive": sensitive, "dlp": dres.public(), "fallbacks": chain, "safety_mode": s["safety_mode"],
+            "warn": bool(decision.get("warn")), "below": bool(decision.get("below")), "est_cost": decision.get("est_cost"),
+            "source": source,
         }
 
         # ---- 4. memory + new-chat signal (background, never delays the answer) ----
@@ -911,7 +1055,8 @@ class AutoRouter(CustomLogger):
             _write_state(state_row)
         _write_quota_report()
 
-        _event("route", rid=rid, mode=mode, requested=f"auto-{mode}", model=model, task=decision["task"],
+        _event("route", rid=rid, session=key[:12], band=decision.get("band"), safety_mode=s["safety_mode"], sensitive=sensitive,
+               est_cost=decision.get("est_cost"), mode=mode, requested=f"auto-{mode}", model=model, task=decision["task"],
                complexity=decision["complexity"], effort=decision.get("effort"), source=source,
                reason=adj_reason or reason, handoff_from=prev_model if handoff else None, call_type=str(call_type),
                step=sig["steps"], ctx_tokens=client_tokens, model_tokens=tokens, ctx_pct=pct, quota=quota_now.get("state"),

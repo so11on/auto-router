@@ -17,7 +17,6 @@ import policy  # noqa: E402
 import yaml  # noqa: E402
 from quota import Tracker  # noqa: E402
 
-ROUTING = yaml.safe_load(open(os.path.join(ROOT, "litellm", "routing.yaml")))
 CFG = dict(policy.DEFAULT_SWITCHING)
 
 
@@ -39,77 +38,37 @@ def convo(*steps):
 
 
 class Policy(unittest.TestCase):
-    def target(self, c, mode="smart"):
-        return policy.pick(ROUTING, mode, "codegen", c)
+    """policy.py only decides WHEN a running task is re-evaluated; the choice itself is engine.route() (tests/test_engine.py)."""
 
-    def test_ladder_is_the_profile_floor_and_ceiling(self):
-        self.assertEqual(policy.ladder(ROUTING, "smart")[0], "claude-haiku")
-        self.assertEqual(policy.ladder(ROUTING, "smart")[-1], "claude-opus")
-        self.assertTrue(all(m.startswith("free-pool") for m in policy.ladder(ROUTING, "free")))
-
-    def test_upgrade_on_two_tool_errors(self):
-        st = {"decision": self.target(2)}
+    def test_failure_signals(self):
         sig = policy.signals(convo(tool_step(result="Error: tests failed"), tool_step(result="Traceback ...")))
-        self.assertTrue(policy.needs_checkpoint(st, sig, CFG))
-        d, why, switched = policy.decide(ROUTING, "smart", st, self.target(2), sig, False, CFG)
-        self.assertTrue(switched)
-        self.assertGreater(policy.rank(ROUTING, "smart", d["model"]), policy.rank(ROUTING, "smart", "claude-sonnet") - 1)
-        self.assertEqual(why, "tool errors")
-
-    def test_upgrade_on_loop(self):
+        self.assertTrue(policy.failing(sig))
+        self.assertTrue(policy.needs_checkpoint({}, sig, CFG))
         same = tool_step(name="grep", args='{"q": "x"}')
-        sig = policy.signals(convo(same, same, same))
-        self.assertTrue(sig["loop"])
-        d, why, switched = policy.decide(ROUTING, "smart", {"decision": self.target(1)}, self.target(1), sig, False, CFG)
-        self.assertTrue(switched)
-        self.assertEqual(why, "tool-call loop")
-
-    def test_upgrade_when_next_steps_are_harder(self):
-        sig = policy.signals(convo(*steps(4)))
-        d, why, switched = policy.decide(ROUTING, "smart", {"decision": self.target(1)}, self.target(5), sig, False, CFG)
-        self.assertEqual((d["model"], why, switched), ("claude-opus", "harder next steps", True))
-
-    def test_downgrade_needs_confirmations_and_steps(self):
-        st = {"decision": self.target(5), "steps_since_switch": 4}
-        sig = policy.signals(convo(*steps(4)))
-        d, why, switched = policy.decide(ROUTING, "smart", st, self.target(1), sig, False, CFG)
-        self.assertFalse(switched)
-        self.assertIn("pending (1/2)", why)
-        d, why, switched = policy.decide(ROUTING, "smart", st, self.target(1), sig, False, CFG)
-        self.assertTrue(switched)
-        self.assertEqual(d["model"], "claude-haiku")
-
-    def test_no_downgrade_right_after_a_switch(self):
-        st = {"decision": self.target(5), "steps_since_switch": 1, "down_votes": 5}
-        sig = policy.signals(convo(tool_step()))
-        _, _, switched = policy.decide(ROUTING, "smart", st, self.target(1), sig, False, CFG)
-        self.assertFalse(switched)
-
-    def test_new_user_turn_downgrades_immediately(self):
-        d, _, switched = policy.decide(ROUTING, "smart", {"decision": self.target(5)}, self.target(1),
-                                       policy.signals(convo()), True, CFG)
-        self.assertEqual((d["model"], switched), ("claude-haiku", True))
+        loop = policy.signals(convo(same, same, same))
+        self.assertTrue(loop["loop"] and policy.failing(loop))
+        self.assertFalse(policy.failing(policy.signals(convo(*steps(2)))))
 
     def test_checkpoint_cadence(self):
         st = {"last_eval_step": 0}
         self.assertFalse(policy.needs_checkpoint(st, policy.signals(convo(*steps(3))), CFG))
         self.assertTrue(policy.needs_checkpoint(st, policy.signals(convo(*steps(4))), CFG))
 
-    def test_ceiling_holds(self):
-        sig = policy.signals(convo(tool_step(result="error"), tool_step(result="error")))
-        d, why, switched = policy.decide(ROUTING, "smart", {"decision": self.target(5)}, self.target(5), sig, False, CFG)
-        self.assertEqual((d["model"], switched), ("claude-opus", False))
+    def test_downgrade_needs_confirmations_and_steps(self):
+        st = {"steps_since_switch": 4}
+        sig = policy.signals(convo(*steps(4)))
+        self.assertFalse(policy.downgrade_allowed(st, sig, False, CFG))   # 1 of 2
+        self.assertTrue(policy.downgrade_allowed(st, sig, False, CFG))    # 2 of 2
+        self.assertEqual(st["down_votes"], 0)
 
-    def test_adjust_skips_exhausted_and_too_small(self):
-        dec = self.target(2)  # sonnet
-        health = lambda m: "exhausted" if "sonnet" in m else "ok"
-        d, why = policy.adjust(ROUTING, "smart", dec, health, lambda m: True, lambda n: n)
-        self.assertEqual(d["model"], "claude-opus")  # stronger first
-        self.assertIn("quota", why)
-        d, why = policy.adjust(ROUTING, "free", policy.pick(ROUTING, "free", "codegen", 1), lambda m: "ok",
-                               lambda m: m != "free-pool-fast", lambda n: n)
-        self.assertEqual(d["model"], "free-pool-coding")
-        self.assertIn("context", why)
+    def test_no_downgrade_right_after_a_switch(self):
+        st = {"steps_since_switch": 1, "down_votes": 5}
+        self.assertFalse(policy.downgrade_allowed(st, policy.signals(convo(tool_step())), False, CFG))
+
+    def test_new_user_turn_downgrades_immediately(self):
+        st = {"down_votes": 1}
+        self.assertTrue(policy.downgrade_allowed(st, policy.signals(convo()), True, CFG))
+        self.assertEqual(st["down_votes"], 0)
 
 
 class Quota(unittest.TestCase):

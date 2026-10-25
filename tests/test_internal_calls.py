@@ -30,7 +30,7 @@ class InternalCalls(unittest.TestCase):
         h._classify = REAL_CLASSIFY
 
     def tearDown(self):
-        h.FREE_POOL_ENABLED = False
+        h.FREE_POOL_ENABLED = True
         for k, v in self.saved.items():
             if v is None:
                 os.environ.pop(k, None)

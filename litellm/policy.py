@@ -1,10 +1,10 @@
-"""Model choice inside a profile: complexity table + mid-task checkpoints + hysteresis + quota/context adjustments.
+"""Mid-task switching helpers: failure signals, checkpoint timing and downgrade hysteresis.
 
-The profile's table in routing.yaml is the guideline: it lists, from cheapest to strongest, the only models the profile
-may use (its floor and ceiling). Within a task the model can move up or down that table:
-  - up immediately on failure signals (consecutive tool errors, a tool-call loop) or a higher classified complexity;
+Which model serves a request is decided by engine.route() from the tables in routing.yaml. This module only decides WHEN a running
+task may be re-evaluated and whether a move to a weaker / cheaper model is allowed yet:
+  - up immediately on failure signals (consecutive tool errors, a tool-call loop) or a harder classification;
   - down only after `downgrade_confirmations` checkpoints in a row agree and `min_steps_between_switches` steps passed.
-New user messages are re-evaluated freely in both directions.
+A new user message is re-evaluated freely in both directions.
 """
 import json
 import re
@@ -12,29 +12,6 @@ import re
 ERROR_RE = re.compile(r"(error|exception|traceback|failed|failure|not found|exit code [1-9]|command failed|cannot|denied)", re.I)
 
 DEFAULT_SWITCHING = {"checkpoint_every": 4, "min_steps_between_switches": 3, "downgrade_confirmations": 2}
-
-
-def pick(routing: dict, mode: str, task: str, complexity: int) -> dict:
-    c = max(1, min(5, complexity + (routing.get("task_bump") or {}).get(task, 0)))
-    tiers = routing["modes"][mode]
-    for tier in tiers:
-        if c <= tier["max_complexity"]:
-            return {**tier, "task": task, "complexity": c}
-    return {**tiers[-1], "task": task, "complexity": c}
-
-
-def ladder(routing: dict, mode: str) -> list:
-    """Distinct models of the profile, cheapest first (the order they appear in the table)."""
-    out = []
-    for tier in routing["modes"][mode]:
-        if tier["model"] not in out:
-            out.append(tier["model"])
-    return out
-
-
-def rank(routing: dict, mode: str, model: str) -> int:
-    lad = ladder(routing, mode)
-    return lad.index(model) if model in lad else -1
 
 
 def signals(messages: list) -> dict:
@@ -65,72 +42,17 @@ def needs_checkpoint(state: dict, sig: dict, cfg: dict) -> bool:
     return sig["steps"] - state.get("last_eval_step", 0) >= cfg["checkpoint_every"]
 
 
-def decide(routing: dict, mode: str, state: dict, target: dict, sig: dict, new_user_turn: bool, cfg: dict):
-    """Apply hysteresis. Returns (decision, reason, switched)."""
-    current = state.get("decision")
-    if current is None:
-        return target, "first decision", True
-    cur_rank, tgt_rank = rank(routing, mode, current["model"]), rank(routing, mode, target["model"])
-    failing = sig["consecutive_errors"] >= 2 or sig["loop"]
-    if failing and tgt_rank <= cur_rank:  # failure signal: go one step up the ladder
-        lad = ladder(routing, mode)
-        if cur_rank + 1 < len(lad):
-            up = next(t for t in routing["modes"][mode] if t["model"] == lad[cur_rank + 1])
-            return ({**up, "task": target["task"], "complexity": max(target["complexity"], current["complexity"])},
-                    "tool errors" if sig["consecutive_errors"] >= 2 else "tool-call loop", True)
-        return current, "already at the profile ceiling", False
-    if tgt_rank > cur_rank:
+def failing(sig: dict) -> bool:
+    return sig["consecutive_errors"] >= 2 or bool(sig["loop"])
+
+
+def downgrade_allowed(state: dict, sig: dict, new_user_turn: bool, cfg: dict) -> bool:
+    """Count one more vote for a cheaper / weaker model and say whether the move may happen now."""
+    if new_user_turn:
         state["down_votes"] = 0
-        return target, "harder next steps", True
-    if tgt_rank < cur_rank:
-        if new_user_turn:
-            state["down_votes"] = 0
-            return target, "new request is simpler", True
-        state["down_votes"] = state.get("down_votes", 0) + 1
-        if (state["down_votes"] >= cfg["downgrade_confirmations"]
-                and state.get("steps_since_switch", 0) >= cfg["min_steps_between_switches"]):
-            state["down_votes"] = 0
-            return target, "simpler next steps", True
-        return current, f"downgrade pending ({state['down_votes']}/{cfg['downgrade_confirmations']})", False
-    state["down_votes"] = 0
-    if target.get("effort") != current.get("effort"):
-        return target, "effort adjusted", False
-    return current, "unchanged", False
-
-
-class Blocked(Exception):
-    """No model is allowed for this request (safety / sensitive content / profile)."""
-
-
-def adjust(routing: dict, mode: str, decision: dict, health, fits, resolve, allowed=None):
-    """Swap to another model of the same profile if the chosen one is out of quota, cannot hold the context, or may not
-    receive this request (safety, sensitive content). Raises Blocked when nothing in the profile is allowed.
-
-    health(name) -> state string, fits(name) -> bool, resolve(name) -> concrete model_name (claude-* -> -cli/-api),
-    allowed(concrete_name) -> bool. Preference: the chosen model, then stronger ones (closest first), then cheaper ones."""
-    allowed = allowed or (lambda name: True)
-    lad = ladder(routing, mode)
-    model = decision["model"]
-    if model not in lad:
-        if not allowed(resolve(model)):
-            raise Blocked(model)
-        return decision, None
-    i = lad.index(model)
-    order = [model] + lad[i + 1:] + list(reversed(lad[:i]))
-    tier_of = lambda cand: next(t for t in routing["modes"][mode] if t["model"] == cand)
-    for cand in order:
-        concrete = resolve(cand)
-        if not allowed(concrete):
-            continue
-        if health(concrete) in ("critical", "exhausted") or not fits(concrete):
-            continue
-        if cand == model:
-            return decision, None
-        why = "privacy" if not allowed(resolve(model)) else ("quota" if health(resolve(model)) in ("critical", "exhausted") else "context")
-        return {**tier_of(cand), "task": decision["task"], "complexity": decision["complexity"]}, f"{model} skipped ({why})"
-    for cand in order:  # nothing healthy: keep the first allowed one anyway
-        if allowed(resolve(cand)):
-            if cand == model:
-                return decision, "no healthy alternative; keeping choice"
-            return {**tier_of(cand), "task": decision["task"], "complexity": decision["complexity"]}, f"{model} skipped (privacy); no healthy alternative"
-    raise Blocked(model)
+        return True
+    state["down_votes"] = state.get("down_votes", 0) + 1
+    if state["down_votes"] >= cfg["downgrade_confirmations"] and state.get("steps_since_switch", 0) >= cfg["min_steps_between_switches"]:
+        state["down_votes"] = 0
+        return True
+    return False

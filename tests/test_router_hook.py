@@ -11,7 +11,9 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.environ["ROUTING_FILE"] = os.path.join(ROOT, "litellm", "routing.yaml")
 os.environ["CLAUDE_PRIMARY"] = "cli"
-os.environ["FREE_POOL_ENABLED"] = "false"
+os.environ["FREE_POOL_ENABLED"] = "true"
+for _k in ("GEMINI_API_KEY", "GEMINI_FREE_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+    os.environ[_k] = "test-key"  # engine availability: a model with a missing key is skipped
 os.environ["SAFETY_MODE"] = "off"  # legacy routing tests; safety-on behaviour lives in test_hook_safety.py
 os.environ["SENSITIVE_GUARD"] = "off"
 os.environ["SENSITIVE_MASK_SECRETS"] = "off"
@@ -31,6 +33,17 @@ sys.modules.update({"litellm": litellm, "litellm.integrations": integrations,
                     "litellm.integrations.custom_logger": custom_logger,
                     "litellm.proxy": proxy_pkg, "litellm.proxy.proxy_server": proxy_server})
 sys.path.insert(0, os.path.join(ROOT, "litellm"))
+import json as _json  # noqa: E402
+import tempfile as _tmp  # noqa: E402
+import yaml as _yaml  # noqa: E402
+
+# every pool model id counts as verified (what `ar.mjs omniroute` would have written to data/pool-members.json)
+_data = _tmp.mkdtemp()
+with open(os.path.join(ROOT, "litellm", "models.yaml")) as _f:
+    _ids = [m["omni"] for m in _yaml.safe_load(_f)["models"].values() if m.get("omni")]
+with open(os.path.join(_data, "pool-members.json"), "w") as _f:
+    _json.dump({c: [{"id": i, "privacy": "no_retention"} for i in _ids] for c in ("free-fast", "free-coding")}, _f)
+os.environ["AR_DATA_DIR"] = _data
 import router_hook as h  # noqa: E402
 
 
@@ -82,27 +95,36 @@ class Hook(unittest.TestCase):
         self.assertEqual(self.call("gemini-pro")["model"], "gemini-pro")
 
     def test_free_never_uses_paid_models(self):
-        for c in (1, 3, 5):
-            self.fixed["complexity"] = c
-            self.assertTrue(self.call("auto-free", text=f"t{c}")["model"].startswith("gemini-free"))
+        for task in ("qa", "codegen", "debug", "architecture", "writing"):
+            for c in (1, 3, 5):
+                self.fixed.update(task=task, complexity=c)
+                d = self.call("auto-free", text=f"t {task} {c}")
+                for name in [d["model"]] + d["fallbacks"]:
+                    self.assertFalse(h.registry.is_paid(name) or h.registry.spec(name).get("subscription"), name)
 
-    def test_pool_used_when_enabled(self):
-        h.FREE_POOL_ENABLED = True
+    def test_pool_used_when_enabled_and_gemini_free_when_not(self):
+        self.fixed.update(task="codegen", complexity=3)
+        self.assertEqual(self.call("auto-free")["model"], "pool-cf-glm")
+        h.FREE_POOL_ENABLED = False
+        h.safety.settings = lambda _o=h.safety.settings: {**_o(), "safety_mode": "off"}
         try:
-            self.assertEqual(self.call("auto-free")["model"], "free-pool-coding")
+            self.assertEqual(self.call("auto-free", text="other")["model"], "gemini-free-flash-lite")
         finally:
-            h.FREE_POOL_ENABLED = False
+            h.FREE_POOL_ENABLED = True
+            h.safety.settings = h.safety.settings.__defaults__[0]
 
     def test_smart_scales_model_and_effort(self):
-        self.fixed["complexity"] = 1
-        self.assertEqual(self.call("auto-smart", text="a")["model"], "claude-haiku-cli")
+        self.fixed.update(task="codegen", complexity=3)
+        self.assertEqual(self.call("auto-smart", text="a")["model"], "claude-sonnet-cli")
         self.fixed.update(complexity=5, task="debug")
         d = self.call("auto-smart", text="b")
         self.assertEqual((d["model"], d["reasoning_effort"]), ("claude-opus-cli", "high"))
 
-    def test_task_bump(self):
-        self.fixed.update(task="plan", complexity=4)
+    def test_task_adjustment(self):
+        self.fixed.update(task="architecture", complexity=4)
         self.assertEqual(self.call("auto-smart")["metadata"]["auto_router"]["complexity"], 5)
+        self.fixed.update(task="qa", complexity=3)
+        self.assertEqual(self.call("auto-smart", text="x")["metadata"]["auto_router"]["complexity"], 2)
 
     def test_tool_turn_reuses_decision(self):
         self.fixed["complexity"] = 5
@@ -114,31 +136,39 @@ class Hook(unittest.TestCase):
         self.assertEqual(again["model"], first["model"])
 
     def test_new_simpler_request_can_downgrade(self):
-        self.fixed["complexity"] = 4
+        self.fixed.update(task="debug", complexity=5)
+        long_text = "conv " + "x" * 300
+        self.assertEqual(self.call("auto-smart", text=long_text)["model"], "claude-opus-cli")
+        self.fixed.update(task="qa", complexity=1)
+        d = self.call("auto-smart", text=long_text)
+        self.assertEqual(d["model"], "claude-haiku-api")  # a simpler, long new request goes down at once
+
+    def test_a_short_message_does_not_drop_below_the_previous_band(self):
+        self.fixed.update(task="debug", complexity=5)
         self.assertEqual(self.call("auto-smart", text="conv")["model"], "claude-opus-cli")
-        self.fixed["complexity"] = 1
-        d = self.call("auto-smart", text="conv")
-        self.assertEqual(d["model"], "claude-haiku-cli")  # escalate-only is gone: a simpler new turn goes down
+        self.fixed.update(task="qa", complexity=1)
+        self.assertEqual(self.call("auto-smart", text="conv")["model"], "claude-opus-cli")
 
     def test_claude_primary_api(self):
         old = h.CLAUDE_PRIMARY
         h.CLAUDE_PRIMARY = "api"
         try:
-            self.fixed["complexity"] = 3
+            self.fixed.update(task="codegen", complexity=3)
             self.assertEqual(self.call("auto-smart")["model"], "claude-sonnet-api")
         finally:
             h.CLAUDE_PRIMARY = old
 
     def test_handoff_note_on_model_change(self):
-        self.fixed["complexity"] = 1
-        self.call("auto-balanced", text="conv2")
-        self.fixed["complexity"] = 5
-        d = self.call("auto-balanced", text="conv2")
+        self.fixed.update(task="codegen", complexity=1)
+        first = self.call("auto-balanced", text="conv2 " + "x" * 300)
+        self.fixed.update(task="codegen", complexity=5)
+        d = self.call("auto-balanced", text="conv2 " + "x" * 300)
+        self.assertNotEqual(first["model"], d["model"])
         self.assertEqual(d["messages"][0]["role"], "system")
         self.assertIn("Handoff", d["messages"][0]["content"])
 
     def test_responses_api_effort(self):
-        self.fixed["complexity"] = 5
+        self.fixed.update(task="debug", complexity=5)
         data = {"model": "auto-smart", "input": "plan this"}
         d = run(h.proxy_handler_instance.async_pre_call_hook(None, None, data, "responses"))
         self.assertEqual(d["reasoning"], {"effort": "high"})
@@ -177,7 +207,7 @@ class Pins(unittest.TestCase):
         self.assertEqual(d["metadata"]["auto_router"]["pinned"], "opus")
 
     def test_model_colon_pin(self):
-        self.assertEqual(self.call("auto-balanced", "model:deepseek explain this")["model"], "pool-deepseek")
+        self.assertEqual(self.call("auto-balanced", "model:qwen explain this")["model"], "pool-qwen")
 
     def test_natural_phrases(self):
         self.assertEqual(self.call("auto-smart", "Faça a migração usando o Opus")["model"], "claude-opus-cli")
@@ -209,11 +239,11 @@ class Pins(unittest.TestCase):
         meta = d["metadata"]["auto_router"]
         self.assertIsNone(meta["pinned"])
         self.assertIn("never uses paid", meta["pin_note"])
-        self.assertTrue(d["model"].startswith("gemini-free"))
+        self.assertFalse(h.registry.is_paid(d["model"]))
         self.assertNotIn("!opus", d["messages"][0]["content"])
 
     def test_auto_free_accepts_free_pin(self):
-        self.assertEqual(self.call("auto-free", "!deepseek hi")["model"], "pool-deepseek")
+        self.assertEqual(self.call("auto-free", "!qwen hi")["model"], "pool-qwen")
 
     def test_tool_turn_stays_on_pinned_model(self):
         self.call("auto-smart", "!opus do it")
@@ -273,7 +303,7 @@ class OpenAI(unittest.TestCase):
             h._configured = old
         meta = d["metadata"]["auto_router"]
         self.assertIsNone(meta["pinned"])
-        self.assertIn("not configured", meta["pin_note"])
+        self.assertIn("not available", meta["pin_note"])
         self.assertNotIn("!gpt", d["messages"][0]["content"])
 
 

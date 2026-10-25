@@ -28,12 +28,14 @@ function render() {
   const q = state.quota || {};
   const qWarn = ["warn", "critical", "exhausted"].includes(q.state) ? ` $(warning) quota ${q.state}` : "";
   const ctx = Math.round(state.ctx_pct || 0);
-  item.text = `$(circuit-board) ${state.mode || "?"} → ${state.model || "?"} · ctx ${ctx}%${qWarn}`;
+  const lock = state.safety_mode === "on" ? "🔒 " : "";
+  const sens = state.sensitive ? " · 🔒 sensível" : "";
+  item.text = `${lock}$(circuit-board) ${state.mode || "?"} → ${state.model || "?"} · ctx ${ctx}%${qWarn}${sens}`;
   item.backgroundColor = ctx >= 85 || q.state === "critical" || q.state === "exhausted"
     ? new vscode.ThemeColor("statusBarItem.warningBackground") : undefined;
   const md = new vscode.MarkdownString(
     `**auto-router** · session \`${state.session}\`\n\n` +
-    `- profile: auto-${state.mode}\n- model: ${state.model}\n- models used: ${(state.trail || []).join(" → ")}\n` +
+    `- profile: auto-${state.mode}\n- safety mode: ${state.safety_mode || "?"}${state.sensitive ? " · this conversation holds sensitive data: only allowed models are used" : ""}\n- model: ${state.model}\n- models used: ${(state.trail || []).join(" → ")}\n` +
     `- context: ${state.ctx_tokens} / ${state.ctx_window} tokens (${ctx}%)${state.compacted ? " · compacted for the model" : ""}\n` +
     `- quota: ${q.state || "?"}${q.window ? ` (${q.window}` + (q.utilization != null ? ` ${Math.round(q.utilization * 100)}%` : "") + (q.eta_min != null ? `, ~${Math.round(q.eta_min)} min left` : "") + ")" : ""}\n` +
     (state.memory_file ? `- memory: ${state.memory_file}\n` : ""));

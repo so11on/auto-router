@@ -67,7 +67,7 @@ class HookSafety(unittest.TestCase):
         self.assertTrue(d["metadata"]["auto_router"]["sensitive"])
 
     def test_pin_to_unsafe_model_is_ignored_when_safety_on(self):
-        d = self.call("auto-balanced", "model:deepseek explain this")
+        d = self.call("auto-balanced", "model:deepseek-free explain this")
         self.assertNotEqual(d["model"], "pool-deepseek")
         self.assertIn("not allowed", d["metadata"]["auto_router"]["pin_note"])
 
@@ -127,3 +127,54 @@ class LogsStayClean(unittest.TestCase):
         for line in text.splitlines():
             json.loads(line)
         self.assertNotIn("content", text.replace("content_filter", ""), "no message bodies in the logs")
+
+
+class MidTask(unittest.TestCase):
+    """RT-06: the DLP runs on every request; a conversation that turns sensitive moves to an allowed model and stays sensitive."""
+
+    def setUp(self):
+        self.saved = {k: os.environ.get(k) for k in ENV + ("DEEPSEEK_API_KEY",)}
+        os.environ.update(SAFETY_MODE="off", SENSITIVE_GUARD="on", SENSITIVE_MASK_SECRETS="on", DEEPSEEK_API_KEY="k")
+        h._sticky.clear()
+        h._last_model.clear()
+        self.orig_conf = h._configured
+        h._configured = lambda name: True
+
+        async def fake(text, *a, **k):
+            return {"task": "codegen", "complexity": 1}
+        h._classify = fake
+
+    def tearDown(self):
+        h._configured = self.orig_conf
+        for k, v in self.saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def call(self, messages):
+        data = {"model": "auto-balanced", "messages": messages}
+        return asyncio.run(h.proxy_handler_instance.async_pre_call_hook(None, None, data, "completion"))
+
+    def test_conversation_turns_sensitive_in_a_tool_result(self):
+        base = [{"role": "user", "content": "add a helper function to the utils module"}]
+        d1 = self.call(base)
+        self.assertEqual(d1["model"], "deepseek-flash")           # restricted: fine for an ordinary prompt
+        key = "sk-proj-" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4"
+        step = base + [{"role": "assistant", "content": None, "tool_calls": [{"id": "1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]},
+                       {"role": "tool", "tool_call_id": "1", "content": f"API_KEY={key}"}]
+        d2 = self.call(step)
+        self.assertNotEqual(d2["model"], "deepseek-flash")
+        self.assertEqual(h.safety.privacy_of(d2["model"]), "trusted")
+        self.assertTrue(d2["metadata"]["auto_router"]["sensitive"])
+        self.assertNotIn(key, repr(d2))
+        d3 = self.call(base + [{"role": "assistant", "content": "done"}, {"role": "user", "content": "now something harmless " + "x" * 300}])
+        self.assertTrue(d3["metadata"]["auto_router"]["sensitive"], "sensitivity is sticky for the rest of the conversation")
+        self.assertEqual(h.safety.privacy_of(d3["model"]), "trusted")
+
+    def test_guard_off_means_no_restriction(self):
+        os.environ.update(SENSITIVE_GUARD="off", SENSITIVE_MASK_SECRETS="off")
+        key = "sk-proj-" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4"
+        d = self.call([{"role": "user", "content": f"add a helper, key {key}"}])
+        self.assertEqual(d["model"], "deepseek-flash")
+        self.assertFalse(d["metadata"]["auto_router"]["sensitive"])

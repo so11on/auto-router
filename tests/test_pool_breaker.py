@@ -57,7 +57,7 @@ class HookWithPoolDown(unittest.TestCase):
         h.litellm.acompletion = None if not hasattr(h.litellm, "acompletion") else h.litellm.acompletion
 
     def tearDown(self):
-        h.FREE_POOL_ENABLED = False
+        h.FREE_POOL_ENABLED = True
         h._breaker.open_until = 0.0
         for k, v in self.saved.items():
             if v is None:
