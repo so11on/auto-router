@@ -1,21 +1,31 @@
 name: tests
 on: [push, pull_request]
+permissions:
+  contents: read
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with: { node-version: 20 }
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with: { python-version: "3.11" }
       - run: pip install pyyaml
-      - name: Node tests (installer, VS Code patching, bridge with stand-in CLIs, personal-data scan)
-        run: node --test tests/ar.test.mjs tests/bridge.test.mjs
-      - name: Python tests (routing hook, policy, quota, context)
+      - name: Node tests (installer, VS Code patching, bridge with stand-in CLIs, hooks, OmniRoute contract, personal-data scan)
+        run: node --test tests/*.test.mjs
+      - name: Python tests (routing hook, DLP, safety, policy, quota, context, pool breaker)
         run: python -m unittest discover -s tests
       - name: Syntax checks
         run: |
           node --check ar.mjs
           node --check claude-bridge/server.mjs
           node --check vscode-extension/extension.js
+      - name: Secret scan (gitleaks)
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

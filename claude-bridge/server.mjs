@@ -21,6 +21,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const IS_WIN = process.platform === "win32";
+import { bearerMatches, cwdSafeForCmd, readBody } from "./safe.mjs";
 
 const PORT = Number(process.env.BRIDGE_PORT || 4100);
 const BRIDGE_KEY = process.env.BRIDGE_KEY || "";
@@ -81,6 +82,9 @@ if (!CODEX_SANDBOXES.has(CODEX_AGENT_SANDBOX)) { console.error(`CODEX_AGENT_SAND
 const COPILOT_BIN = process.env.COPILOT_BIN || "copilot";
 const COPILOT_MODELS = { "copilot-code-mini": process.env.COPILOT_MODEL_MINI || "", "copilot-code-main": process.env.COPILOT_MODEL_MAIN || "", "copilot-code-max": process.env.COPILOT_MODEL_MAX || "" };
 const COPILOT_PROMPT_INLINE_MAX = 6000;
+// Windows .cmd/.bat launchers go through cmd.exe, which re-parses & | < > ^ % " in the working directory.
+const cmdLauncher = (bin) => IS_WIN && /\.(cmd|bat)$/i.test(bin);
+const cwdAllowedFor = (bin, cwd) => !cmdLauncher(bin) || cwdSafeForCmd(cwd);
 const shellArg = (a) => (IS_WIN ? `"${String(a).replace(/"/g, '\\"')}"` : a);
 const DATA_DIR = process.env.AUTO_ROUTER_DATA || path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "data");
 const FRESH_SESSION_AT = Number(process.env.BRIDGE_FRESH_SESSION_AT || 0.8); // of the CLI's context window
@@ -289,6 +293,10 @@ async function handle(req, res, body) {
       res.writeHead(403, { "content-type": "application/json" });
       return res.end(JSON.stringify({ error: { message: `claude-bridge: workspace ${cwd} is outside BRIDGE_ALLOWED_ROOTS`, type: "permission_error" } }));
     }
+    if (!cwdAllowedFor(CLAUDE_BIN, cwd)) {
+      res.writeHead(400, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ error: { message: "claude-bridge: the workspace path contains characters that cmd.exe would interpret (& | < > ^ % \")", type: "invalid_request_error" } }));
+    }
     const nearFull = (st.ctxRatio || 0) >= FRESH_SESSION_AT;
     const resuming = Boolean(st.sessionId) && messages.length >= (st.seen || 0) && !nearFull;
     const sessionId = resuming ? st.sessionId : randomUUID();
@@ -449,6 +457,10 @@ async function handleCodex(req, res, body) {
       res.writeHead(403, { "content-type": "application/json" });
       return res.end(JSON.stringify({ error: { message: `codex-bridge: workspace ${cwd} is outside BRIDGE_ALLOWED_ROOTS`, type: "permission_error" } }));
     }
+    if (!cwdAllowedFor(CODEX_BIN, cwd)) {
+      res.writeHead(400, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ error: { message: "codex-bridge: the workspace path contains characters that cmd.exe would interpret (& | < > ^ % \")", type: "invalid_request_error" } }));
+    }
     const parts = ["## How you are being used\nYou are driven through a chat bridge; the reply is shown in a VS Code chat. Do the work with your tools, " +
       "then answer concisely. Other models may continue this conversation, so state what you changed and any open follow-ups."];
     const history = transcript(messages.slice(Math.max(0, lastUserIdx - 12), lastUserIdx));
@@ -546,6 +558,10 @@ async function handleCopilot(req, res, body) {
       res.writeHead(403, { "content-type": "application/json" });
       return res.end(JSON.stringify({ error: { message: `copilot-bridge: workspace ${cwd} is outside BRIDGE_ALLOWED_ROOTS`, type: "permission_error" } }));
     }
+    if (!cwdAllowedFor(COPILOT_BIN, cwd)) {
+      res.writeHead(400, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ error: { message: "copilot-bridge: the workspace path contains characters that cmd.exe would interpret (& | < > ^ % \")", type: "invalid_request_error" } }));
+    }
     const parts = ["## How you are being used\nYou are driven through a chat bridge; the reply is shown in a VS Code chat. " +
       (agent ? "Do the work with your tools, then answer concisely. " : "Read-only: do not modify files. ") +
       "Other models may continue this conversation, so state what you changed and any open follow-ups."];
@@ -616,15 +632,14 @@ async function handleCopilot(req, res, body) {
 
 http.createServer((req, res) => {
   if (req.url === "/healthz") return res.end("ok");
-  if (req.headers.authorization !== `Bearer ${BRIDGE_KEY}`) { res.writeHead(401); return res.end("unauthorized"); }
+  if (!bearerMatches(req.headers.authorization, BRIDGE_KEY)) { res.writeHead(401); return res.end("unauthorized"); }
   if (req.method === "GET" && req.url.startsWith("/v1/models")) {
     res.writeHead(200, { "content-type": "application/json" });
     return res.end(JSON.stringify({ object: "list", data: [...Object.keys(MODELS), ...Object.keys(CODEX_MODELS), ...Object.keys(COPILOT_MODELS)].map((id) => ({ id, object: "model", owned_by: id.startsWith("codex") ? "codex" : id.startsWith("copilot") ? "github-copilot" : "claude-code" })) }));
   }
   if (req.method === "POST" && req.url.startsWith("/memory/write")) {
-    let raw = "";
-    req.on("data", (d) => (raw += d));
-    req.on("end", () => {
+    readBody(req, (err, raw) => {
+      if (err) { res.writeHead(err.status || 400, { "content-type": "application/json", connection: "close" }); return res.end(JSON.stringify({ error: String(err.message) })); }
       try {
         const out = writeMemory(JSON.parse(raw));
         res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify(out));
@@ -640,9 +655,8 @@ http.createServer((req, res) => {
     return res.end(JSON.stringify(latestMemory(target) || { workspace: target, index: "", latest: null }));
   }
   if (req.method === "POST" && req.url.startsWith("/v1/chat/completions")) {
-    let raw = "";
-    req.on("data", (d) => (raw += d));
-    req.on("end", () => {
+    readBody(req, (err, raw) => {
+      if (err) { res.writeHead(err.status || 400, { "content-type": "application/json", connection: "close" }); return res.end(JSON.stringify({ error: { message: `claude-bridge: ${err.message} (limit 2 MB)`, type: "invalid_request_error" } })); }
       let body; try { body = JSON.parse(raw); } catch { res.writeHead(400); return res.end("bad json"); }
       (String(body.model || "").startsWith("codex-code-") ? handleCodex : String(body.model || "").startsWith("copilot-code-") ? handleCopilot : handle)(req, res, body).catch((e) => { if (!res.headersSent) res.writeHead(500); res.end(JSON.stringify({ error: { message: String(e) } })); });
     });

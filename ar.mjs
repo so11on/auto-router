@@ -490,10 +490,24 @@ export function applySync(plan, upDir, localDir, backupDir) {
   }
   if (plan.env.added.length) { save(".env"); fs.writeFileSync(path.join(localDir, ".env"), plan.texts[".env"], { mode: 0o600 }); }
 }
-async function fetchUpstream(repo, ref) {
+/** SEC-06: updates follow released tags. Returns the highest vX.Y.Z tag, or null when the repository has none (yet). */
+export function latestTag(names) {
+  return (names || []).filter((n) => /^v\d+\.\d+\.\d+$/.test(n)).sort((a, b) => (newer(a.slice(1), b.slice(1)) ? 1 : newer(b.slice(1), a.slice(1)) ? -1 : 0)).pop() || null;
+}
+async function resolveRef(repo, flags) {
+  if (flags.ref && flags.ref !== true) return { ref: String(flags.ref), tag: /^v\d+\.\d+\.\d+$/.test(String(flags.ref)) };
+  try {
+    const r = await http(`https://api.github.com/repos/${repo}/tags?per_page=50`, { timeout: 15000 });
+    const tag = latestTag((r.json || []).map((x) => x.name));
+    if (tag) return { ref: tag, tag: true };
+  } catch {}
+  warn(`${repo} has no released tag yet (or GitHub could not be reached): using main, which may contain unreleased changes`);
+  return { ref: "main", tag: false, fallback: true };
+}
+async function fetchUpstream(repo, ref, tag = false) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ar-update-"));
   const tgz = path.join(tmp, "src.tar.gz");
-  const res = await fetch(`https://codeload.github.com/${repo}/tar.gz/refs/heads/${ref}`, { redirect: "follow", signal: AbortSignal.timeout(60000) });
+  const res = await fetch(`https://codeload.github.com/${repo}/tar.gz/refs/${tag ? "tags" : "heads"}/${ref}`, { redirect: "follow", signal: AbortSignal.timeout(60000) });
   if (!res.ok) throw new Error(`download failed: HTTP ${res.status} for ${repo}@${ref}`);
   fs.writeFileSync(tgz, Buffer.from(await res.arrayBuffer()));
   const x = run("tar", ["-xzf", tgz, "-C", tmp]);
@@ -503,10 +517,16 @@ async function fetchUpstream(repo, ref) {
   return path.join(tmp, dir.name);
 }
 async function update(flags) {
-  const repo = String(flags.repo || REPO_DEFAULT), ref = String(flags.ref || "main");
+  const repo = String(flags.repo || REPO_DEFAULT);
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return bad("--repo must look like owner/name");
-  let up;
-  try { up = flags.from ? path.resolve(String(flags.from)) : await fetchUpstream(repo, ref); } catch (err) { return bad(err.message); }
+  let up, ref = "main", isTag = false;
+  if (!flags.from) {
+    const r = await resolveRef(repo, flags);
+    ref = r.ref; isTag = r.tag;
+    if (!isTag && flags.ref && flags.apply && !flags.yes) return bad(`--ref ${ref} is a branch (unreleased code). Releases are tags such as v0.4.0. To apply a branch anyway, add --yes.`);
+    if (!isTag && flags.ref) warn(`--ref ${ref} is a branch, not a release: it can contain unfinished or unreviewed changes`);
+  }
+  try { up = flags.from ? path.resolve(String(flags.from)) : await fetchUpstream(repo, ref, isTag); } catch (err) { return bad(err.message); }
   const readVer = (d) => { try { return fs.readFileSync(path.join(d, "VERSION"), "utf8").trim(); } catch { return null; } };
   const localV = readVer(ROOT) || "0.0.0 (before versioning)", upV = readVer(up) || "unknown";
   console.log(`Installed: ${localV}   Latest (${flags.from ? "local folder" : repo + "@" + ref}): ${upV}\n`);
@@ -1105,7 +1125,7 @@ function vscodeHarden(flags) {
   if (!sandbox && !flags.uninstall) info("terminal sandbox skipped: it does not exist on Windows (use WSL2)");
   if (!flags.uninstall) info("Not touched: global auto-approve, Autopilot, bypass. chat.agent.networkFilter may be managed by your organisation (see docs/VSCODE-SETUP.md).");
 }
-function vscode(flags) {
+async function vscode(flags) {
   if (flags.harden) return vscodeHarden(flags);
   const e = readEnv();
   if (!e?.LITELLM_MASTER_KEY) return bad("no .env / LITELLM_MASTER_KEY — run: node ar.mjs init");
@@ -1119,7 +1139,20 @@ function vscode(flags) {
   fs.writeFileSync(file, next, { mode: 0o600 });
   ok(`${flags.uninstall ? "removed auto-router from" : "added the Auto: Free / Balanced / Smart models to"} ${file}${old ? " (backup: .bak-auto-router)" : ""}`);
   if (!flags.uninstall) info("The gateway key sits in that file in plain text (VS Code ignores apiKey and needs requestHeaders); it only opens 127.0.0.1:4000.");
-  const vsix = path.join(ROOT, "vscode-extension", "auto-router-companion.vsix");
+  // SEC-06: the extension is built here from the readable sources; the committed .vsix is only a fallback and must match SHA256SUMS
+  let vsix = path.join(ROOT, "vscode-extension", "auto-router-companion.vsix");
+  try {
+    const { buildVsix, sha256 } = await import("./scripts/build-vsix.mjs");
+    const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), "ar-vsix-"));
+    vsix = path.join(dir2, "auto-router-companion.vsix");
+    fs.writeFileSync(vsix, buildVsix());
+    info(`built the companion extension from vscode-extension/ (sha256 ${sha256(fs.readFileSync(vsix)).slice(0, 16)}…)`);
+  } catch (err) {
+    const sums = (() => { try { return fs.readFileSync(path.join(ROOT, "vscode-extension", "SHA256SUMS"), "utf8"); } catch { return ""; } })();
+    const have = crypto.createHash("sha256").update(fs.existsSync(vsix) ? fs.readFileSync(vsix) : "").digest("hex");
+    if (!sums.includes(have)) return bad(`could not build the extension (${err.message}) and the committed .vsix does not match vscode-extension/SHA256SUMS — not installing it`);
+    info("could not build from source; using the committed .vsix (its SHA-256 matches SHA256SUMS)");
+  }
   const code = flags.dir ? null : findCode();
   if (flags.uninstall) { if (code) run(code, ["--uninstall-extension", "local.auto-router-companion"]); return; }
   if (!code) return warn(`could not find the \`code\` command. Install the extension manually: Extensions view → … → Install from VSIX → ${vsix}`);
@@ -1231,7 +1264,7 @@ const HELP = `auto-router — node ar.mjs <command>
   init        --roots <folders> [--safety on|off] [--profile A-F|auto] [--families claude,openai,copilot,gemini] [--pool yes|no] [--claude cli|api|none] [--openai cli|api|none] [--force]
   keys        [--check] show which keys are set; --check tests each one against its provider
   cloudflare-token   fix "Authentication error" when CLOUDFLARE_API_TOKEN is a 'create tokens' token (docs/GET-KEYS.md)
-  update      [--apply] [--restart] [--repo owner/name] [--ref branch] [--from <folder>]   dry run by default; --apply changes files (backup kept)
+  update      [--apply] [--restart] [--repo owner/name] [--ref vX.Y.Z|branch [--yes]] [--from <folder>]   follows the latest release tag; dry run by default; --apply changes files (backup kept)
   safety      [on|off|status]   SAFETY_MODE (privacy classes) and the sensitive-data guard
   detect      [--json]  find out which paid plans/logins exist (never prints e-mails or keys)
   copilot     [--mini ID --main ID --max ID] [--check]   use your paid GitHub Copilot plan (Copilot CLI)

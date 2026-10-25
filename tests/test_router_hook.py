@@ -187,6 +187,18 @@ class Pins(unittest.TestCase):
         d = self.call("auto-smart", "explain what Opus is in music")
         self.assertIsNone(d["metadata"]["auto_router"]["pinned"])
 
+    def test_sec06_pin_token_must_start_a_line_or_follow_whitespace(self):
+        for text in ("see foo!opus here", "open https://x.io/model:opus now", "path/!opus/file"):
+            self.assertIsNone(self.call("auto-smart", text)["metadata"]["auto_router"]["pinned"], text)
+        self.assertEqual(self.call("auto-smart", "do it\n!opus now")["metadata"]["auto_router"]["pinned"], "opus")
+        self.assertEqual(self.call("auto-smart", "ok model:haiku")["metadata"]["auto_router"]["pinned"], "haiku")
+
+    def test_sec06_natural_pin_only_in_a_short_sentence(self):
+        long_sentence = "Please explain in great detail every single step of how the compiler front end works and how the whole optimisation pipeline is organised, using Opus"
+        self.assertGreater(len(long_sentence), 120)
+        self.assertIsNone(self.call("auto-smart", long_sentence)["metadata"]["auto_router"]["pinned"])
+        self.assertEqual(self.call("auto-smart", "Refactor this file. Do it using Opus")["metadata"]["auto_router"]["pinned"], "opus")
+
     def test_ambiguous_names_need_bang(self):
         d = self.call("auto-smart", "use pro techniques to write this")
         self.assertIsNone(d["metadata"]["auto_router"]["pinned"])

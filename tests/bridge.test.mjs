@@ -188,3 +188,15 @@ test("SEC-13: project memory is private (0600 file, 0700 folder)", { skip }, asy
     assert.equal(fs.statSync(dir).mode & 0o777, 0o700);
   });
 });
+
+test("SEC-06: an oversized request is answered 413 on both POST endpoints", { skip }, async () => {
+  await withBridge(async ({ port }) => {
+    const big = "x".repeat(2 * 1024 * 1024 + 100);
+    for (const url of ["/v1/chat/completions", "/memory/write"]) {
+      const r = await fetch(`http://127.0.0.1:${port}${url}`, { method: "POST", headers: { authorization: "Bearer k", "content-type": "application/json" }, body: JSON.stringify({ pad: big }) }).catch(() => null);
+      assert.ok(r === null || r.status === 413, `${url}: ${r && r.status}`);
+      if (r) assert.equal(r.status, 413);
+    }
+    assert.equal((await fetch(`http://127.0.0.1:${port}/v1/models`, { headers: { authorization: "Bearer wrong" } })).status, 401);
+  });
+});

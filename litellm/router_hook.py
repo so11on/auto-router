@@ -368,7 +368,8 @@ def _find_pin(text: str, pins: dict):
         return None
     body = _request_text(text)
     names = "|".join(re.escape(n) for n in sorted(pins, key=len, reverse=True))
-    m = re.search(rf"(?<![\w`/])(?:!|model:)({names})\b", body, re.IGNORECASE)
+    # SEC-06: the token must start a line or follow whitespace (not "a!opus", not inside a path or a URL)
+    m = re.search(rf"(?:^|(?<=\s))(?:!|model:)({names})\b", body, re.IGNORECASE | re.MULTILINE)
     if m:
         return m.group(1).lower(), pins[m.group(1).lower()], m.group(0)
     natural = "|".join(re.escape(n) for n, spec in pins.items() if spec.get("natural"))
@@ -378,7 +379,12 @@ def _find_pin(text: str, pins: dict):
         for chunk in (head, tail):
             m = re.search(pat, chunk, re.IGNORECASE)
             if m:
-                return m.group(1).lower(), pins[m.group(1).lower()], None  # natural phrase stays in the text
+                # only a short sentence counts as an instruction (a long paragraph mentioning "with Opus" is just text)
+                start = max(chunk.rfind(c, 0, m.start()) for c in ".!?\n") + 1
+                ends = [i for i in (chunk.find(c, m.end()) for c in ".!?\n") if i >= 0]
+                sentence = chunk[start:min(ends) if ends else len(chunk)]
+                if len(sentence.strip()) <= 120:
+                    return m.group(1).lower(), pins[m.group(1).lower()], None  # natural phrase stays in the text
     return None
 
 

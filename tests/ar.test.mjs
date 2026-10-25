@@ -311,3 +311,29 @@ test("SEC-12: vscode hardening is idempotent, keeps user values, never enables a
   assert.throws(() => patchHarden("{ // comment\n}"), /comments/);
   assert.equal(JSON.parse(patchHarden("", {}, { sandbox: false }).text)["chat.agent.sandbox.enabled"], undefined);
 });
+
+test("SEC-06: the committed .vsix is exactly what the sources build, and SHA256SUMS matches it", async () => {
+  const { buildVsix, sha256 } = await import("../scripts/build-vsix.mjs");
+  const committed = fs.readFileSync(path.join(ROOT, "vscode-extension", "auto-router-companion.vsix"));
+  assert.equal(sha256(buildVsix()), sha256(committed), "run: node scripts/build-vsix.mjs");
+  assert.match(fs.readFileSync(path.join(ROOT, "vscode-extension", "SHA256SUMS"), "utf8"), new RegExp(`^${sha256(committed)}  auto-router-companion\\.vsix\\n$`));
+});
+
+test("SEC-06: CI workflow is least-privilege, pinned by SHA and scans for secrets", () => {
+  const wf = fs.readFileSync(path.join(ROOT, ".github", "workflows", "test.yml"), "utf8");
+  assert.match(wf, /^permissions:\n  contents: read/m);
+  assert.match(wf, /^concurrency:/m);
+  for (const line of wf.split("\n").filter((l) => /uses:/.test(l))) assert.match(line, /@[0-9a-f]{40}\b/, line);
+  assert.match(wf, /gitleaks/);
+  const dep = fs.readFileSync(path.join(ROOT, ".github", "dependabot.yml"), "utf8");
+  for (const eco of ["github-actions", "npm", "pip"]) assert.ok(dep.includes(eco), eco);
+});
+
+test("SEC-06: update follows the highest release tag and refuses an unreleased branch without --yes", async () => {
+  const { latestTag } = await import("../ar.mjs");
+  assert.equal(latestTag(["main", "v0.9.0", "v0.10.0", "v0.2.1", "nightly", "v1.0.0-rc1"]), "v0.10.0");
+  assert.equal(latestTag(["main", "dev"]), null);
+  assert.equal(latestTag([]), null);
+  const r = spawnSync(process.execPath, [path.join(ROOT, "ar.mjs"), "update", "--ref", "main", "--apply", "--repo", "so11on/auto-router"], { encoding: "utf8", timeout: 60000 });
+  assert.match(r.stdout + r.stderr, /branch|--yes/);
+});
