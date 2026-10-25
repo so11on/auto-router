@@ -107,7 +107,7 @@ function recordQuota(info) {
     list.push([now, util, reset]);
     q.samples[name] = list.slice(-60);
   }
-  try { fs.mkdirSync(DATA_DIR, { recursive: true }); fs.writeFileSync(file + ".tmp", JSON.stringify(q)); fs.renameSync(file + ".tmp", file); } catch {}
+  try { fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 }); fs.writeFileSync(file + ".tmp", JSON.stringify(q), { mode: 0o600 }); fs.renameSync(file + ".tmp", file); } catch {}
 }
 
 // ---------- project memory (.auto-router/memory) ----------
@@ -153,8 +153,9 @@ function latestMemory(ws) {
 let state = {};
 try { state = JSON.parse(fs.readFileSync(STATE_FILE, "utf8")); } catch {}
 const saveState = () => {
-  fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
-  fs.writeFileSync(STATE_FILE, JSON.stringify(state));
+  fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(STATE_FILE + ".tmp", JSON.stringify(state), { mode: 0o600 }); // atomic: a crash never leaves half a file
+  fs.renameSync(STATE_FILE + ".tmp", STATE_FILE);
 };
 const locks = new Map();
 const withLock = async (key, fn) => {

@@ -106,6 +106,20 @@ FAILOVER_NOTICE = "\n\n> ⚠️ `{failed}` was interrupted ({reason}). Continuin
 
 
 # ---------- logging ----------
+# SEC-14: files created by the gateway are private to the owner (AR_UMASK=022 on Linux if the host user cannot read them).
+try:
+    os.umask(int(os.environ.get("AR_UMASK") or "077", 8))
+except ValueError:
+    os.umask(0o077)
+
+
+def _scrub(value, limit: int = 300) -> str:
+    """Error text for the logs: providers sometimes echo the request, so secrets and personal data are masked and the text is capped."""
+    box = {"prompt": str(value)[:limit * 4]}
+    res = dlp.scan_and_mask(box, {**safety.settings(), "mask_secrets": "on", "mask_pii": "on"}, known=dlp.known_secrets())
+    return (box["prompt"] if not res.error else "(unscannable error text withheld)")[:limit]
+
+
 def _append(path: str, row: dict) -> None:
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -154,7 +168,7 @@ def _log_call(kwargs: dict, status: str, start_time, end_time) -> None:
             ms = None
         err = None
         if status != "ok":
-            err = str(kwargs.get("exception") or slo.get("error_str") or "")[:300]
+            err = _scrub(kwargs.get("exception") or slo.get("error_str") or "")
         _event("call", status=status, rid=route.get("rid"),
                model_group="classifier" if meta.get("classifier") else (slo.get("model_group") or kwargs.get("model")),
                deployment=slo.get("model") or kwargs.get("model"), latency_ms=ms, error=err)
@@ -590,7 +604,7 @@ async def _refresh_memory(key: str, mode: str, messages: list, state_row: dict, 
         state_row.update(memory_file=res.get("path"), workspace=res.get("workspace"))
         _event("memory", session=key[:12], path=res.get("path"), ctx_pct=state_row.get("ctx_pct"))
     except Exception as e:
-        _event("memory_error", session=key[:12], error=str(e)[:200])
+        _event("memory_error", session=key[:12], error=_scrub(e, 200))
     if new_chat:
         state_row["action"] = "new_chat"
         _event("new_chat_requested", session=key[:12], ctx_pct=state_row.get("ctx_pct"), memory=state_row.get("memory_file"))
@@ -646,7 +660,7 @@ class AutoRouter(CustomLogger):
         # Nothing produced yet: LiteLLM's own fallbacks already ran. Tool calls cannot be resumed safely.
         if not text or saw_tool_call or not request_data.get("messages"):
             _event("stream_error", rid=rid, model=request_data.get("model"), partial_chars=len(text),
-                   resumable=False, error=str(failure)[:300])
+                   resumable=False, error=_scrub(failure))
             raise failure
 
         from litellm.proxy import proxy_server  # imported lazily: only exists inside the proxy process
@@ -664,7 +678,7 @@ class AutoRouter(CustomLogger):
             hops += 1
             t_failed.append(nxt)
             _event("stream_failover", rid=rid, failed=failed, to=nxt, partial_chars=len(text),
-                   reason=_short_reason(failure), error=str(failure)[:300])
+                   reason=_short_reason(failure), error=_scrub(failure))
             cont = messages + [{"role": "assistant", "content": text},
                                {"role": "user", "content": CONTINUE_PROMPT}]
             extra = {k: request_data[k] for k in ("max_tokens", "temperature") if k in request_data}
@@ -703,7 +717,7 @@ class AutoRouter(CustomLogger):
             except Exception as err2:
                 failure, failed = err2, nxt
         _event("stream_error", rid=rid, model=request_data.get("model"), partial_chars=len(text),
-               resumable=False, error=f"no continuation available: {str(failure)[:250]}")
+               resumable=False, error="no continuation available: " + _scrub(failure, 250))
         raise failure
 
     async def async_post_call_success_hook(self, data, user_api_key_dict, response):

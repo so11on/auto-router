@@ -81,3 +81,49 @@ class HookSafety(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LogsStayClean(unittest.TestCase):
+    """SEC-14: no message content, secret or personal data reaches router.jsonl / usage.jsonl."""
+    SENTINEL = "ZXQ-SENTINEL-do-not-log-4711"
+
+    def setUp(self):
+        self.saved = {k: os.environ.get(k) for k in ENV}
+
+    def tearDown(self):
+        for k, v in self.saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_sentinel_never_appears_in_logs_even_in_error_text(self):
+        import asyncio
+        import json
+        for path in (h.EVENT_FILE, h.USAGE_FILE):
+            if os.path.exists(path):
+                os.remove(path)
+        os.environ.update(SAFETY_MODE="on", SENSITIVE_GUARD="on", SENSITIVE_MASK_SECRETS="on")
+        h._sticky.clear()
+
+        async def fake(text, *a, **k):
+            return {"task": "codegen", "complexity": 3}
+        h._classify = fake
+        key = "sk-proj-" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4"
+        data = {"model": "auto-balanced", "messages": [{"role": "user", "content": f"{self.SENTINEL} key {key}"}]}
+        data = asyncio.run(h.proxy_handler_instance.async_pre_call_hook(None, None, data, "completion"))
+        kwargs = {"model": data["model"], "litellm_params": {"metadata": data["metadata"]},
+                  "exception": f"provider echoed: {self.SENTINEL} {key}", "standard_logging_object": {"error_str": f"echo {key}"}}
+        start = end = __import__("time").time()
+        asyncio.run(h.proxy_handler_instance.async_log_failure_event(kwargs, None, start, end))
+        asyncio.run(h.proxy_handler_instance.async_log_success_event(kwargs, None, start, end))
+        text = ""
+        for path in (h.EVENT_FILE, h.USAGE_FILE):
+            if os.path.exists(path):
+                text += open(path).read()
+        self.assertGreater(len(text), 0)
+        self.assertNotIn(key, text)
+        self.assertNotIn("A1b2C3d4E5f6G7h8I9j0K1l2M3n4", text)
+        for line in text.splitlines():
+            json.loads(line)
+        self.assertNotIn("content", text.replace("content_filter", ""), "no message bodies in the logs")

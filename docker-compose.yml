@@ -14,6 +14,8 @@ services:
       - REQUIRE_API_KEY=true
       - INITIAL_PASSWORD=${OMNIROUTE_PASSWORD}
       - OMNIROUTE_MEMORY_MB=1024
+      - ENABLE_REQUEST_LOGS=false      # SEC-14: no detailed request/response bodies in OmniRoute's call log (docs/reference/ENVIRONMENT.md, 3.8.52)
+      - CALL_LOG_RETENTION_DAYS=1      # whatever it still keeps is pruned after a day
       - CLOUDFLARE_ACCOUNT_ID=${CLOUDFLARE_ACCOUNT_ID:-}   # read by OmniRoute's Cloudflare Workers AI provider
     volumes:
       - omniroute-data:/app/data
@@ -61,6 +63,7 @@ services:
       - POOL_FAIL_THRESHOLD=${POOL_FAIL_THRESHOLD:-3}
       - POOL_FAIL_WINDOW_S=${POOL_FAIL_WINDOW_S:-60}
       - POOL_COOLDOWN_S=${POOL_COOLDOWN_S:-300}
+      - AR_UMASK=${AR_UMASK:-077}   # files in data/ are private; Linux: set 022 if your user cannot read them
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
