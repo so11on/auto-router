@@ -143,6 +143,21 @@ async function doctor() {
     const open = await portOpen(port);
     info(`port ${port} (${name}): ${open ? "in use (running, or something else)" : "free"}`);
   }
+  // SEC-04: nothing may listen beyond loopback, and the gateway container must reach the host bridge
+  try {
+    const composeText = fs.readFileSync(path.join(ROOT, "docker-compose.yml"), "utf8");
+    const exposed = [...composeText.matchAll(/^\s*-\s*"?(?!127\.0\.0\.1:)(\d+:\d+)"?\s*$/gm)].map((m) => m[1]);
+    if (exposed.length) { bad(`docker-compose.yml publishes ${exposed.join(", ")} on all interfaces — prefix with 127.0.0.1:`); fatal++; }
+    else ok("compose ports are bound to 127.0.0.1 only");
+  } catch {}
+  const bh = String((readEnv() || {}).BRIDGE_HOST || "127.0.0.1");
+  if (["0.0.0.0", "::", "[::]"].includes(bh)) { bad(`BRIDGE_HOST=${bh} exposes the bridge to your network — use 127.0.0.1`); fatal++; }
+  if (dv.status === 0 && (await portOpen(4000)) && (await portOpen(4100))) {
+    const probe = spawnSync("docker", ["compose", "exec", "-T", "litellm", "python", "-c",
+      "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://host.docker.internal:4100/healthz',timeout=5).status==200 else 1)"],
+      { cwd: ROOT, encoding: "utf8" });
+    (probe.status === 0 ? ok : warn)(probe.status === 0 ? "the gateway container reaches claude-bridge" : "the gateway container cannot reach claude-bridge (host.docker.internal:4100) — on Linux bind BRIDGE_HOST to the docker0 address");
+  }
   console.log(readEnv() ? "\n.env exists." : "\nNo .env yet — next: node ar.mjs init");
   process.exitCode = fatal ? 1 : 0;
 }

@@ -1,8 +1,13 @@
+# SEC-04: images are pinned by digest (a moving tag could swap the code that sees every prompt and key).
+# Update on purpose: `node ar.mjs update` never touches the image lines; see docs/SECURITY.md ("Updating the images").
+#   omniroute 3.8.52 · litellm main-stable (litellm 1.106.0) — pinned 2026-10-25
 services:
   omniroute:
-    image: diegosouzapw/omniroute:latest
+    image: diegosouzapw/omniroute:3.8.52@sha256:b08a12e876baa8a5ccadd1ebbe346fe7267dba3b1c9f4fd6bb02070fae41ab6c
     restart: unless-stopped
     stop_grace_period: 40s
+    security_opt:
+      - no-new-privileges:true
     ports:
       - "127.0.0.1:20128:20128"
     environment:
@@ -13,17 +18,46 @@ services:
     volumes:
       - omniroute-data:/app/data
   litellm:
-    image: ghcr.io/berriai/litellm:main-stable
+    image: ghcr.io/berriai/litellm:main-stable@sha256:2e4c0371f3a8c28e4da131d77abaa8341cd3b0c2fcc4d34d7c5900431af7b9d0
     command: ["--config", "/app/ar/config.yaml", "--port", "4000"]
     ports:
       - "127.0.0.1:4000:4000"
-    env_file: .env
     depends_on:
       - omniroute
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /root/.cache
+    # Only what config.yaml (os.environ/...) and the hook modules read. Provider keys of the free pool (GROQ_*, NVIDIA_*,
+    # OPENROUTER_*, ...) and OMNIROUTE_PASSWORD live in OmniRoute / on the host and never enter this container.
     environment:
       - PYTHONPATH=/app/ar
       - ROUTING_FILE=/app/ar/routing.yaml
       - BRIDGE_URL=http://host.docker.internal:4100
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:-}
+      - BRIDGE_KEY=${BRIDGE_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GEMINI_FREE_API_KEY=${GEMINI_FREE_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - FREE_POOL_BASE=${FREE_POOL_BASE:-http://omniroute:20128/v1}
+      - FREE_POOL_KEY=${FREE_POOL_KEY:-}
+      - FREE_POOL_ENABLED=${FREE_POOL_ENABLED:-false}
+      - CLASSIFIER_MODEL=${CLASSIFIER_MODEL:-gemini/gemini-3.5-flash-lite}
+      - AUTO_ROUTER_FOOTER=${AUTO_ROUTER_FOOTER:-true}
+      - CLAUDE_PRIMARY=${CLAUDE_PRIMARY:-cli}
+      - OPENAI_PRIMARY=${OPENAI_PRIMARY:-cli}
+      - SAFETY_MODE=${SAFETY_MODE:-on}
+      - SENSITIVE_GUARD=${SENSITIVE_GUARD:-on}
+      - SENSITIVE_ALLOWED_CLASSES=${SENSITIVE_ALLOWED_CLASSES:-trusted}
+      - SENSITIVE_MASK_SECRETS=${SENSITIVE_MASK_SECRETS:-on}
+      - SENSITIVE_MASK_PII=${SENSITIVE_MASK_PII:-off}
+      - SENSITIVE_IMAGES=${SENSITIVE_IMAGES:-trusted_only}
+      - DLP_FAIL_MODE=${DLP_FAIL_MODE:-closed}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
