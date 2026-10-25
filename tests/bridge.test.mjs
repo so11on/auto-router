@@ -176,3 +176,15 @@ test("SEC-02: same first message in two workspaces are two conversations", { ski
     assert.ok(again.choices);
   });
 });
+
+test("SEC-13: project memory is private (0600 file, 0700 folder)", { skip }, async () => {
+  await withBridge(async ({ port, ws, tmp }) => {
+    const r = await fetch(`http://127.0.0.1:${port}/memory/write`, { method: "POST", headers: { authorization: "Bearer k", "content-type": "application/json" },
+      body: JSON.stringify({ session: "abcd1234", workspace: ws, title: "t", markdown: "# notes\n" }) });
+    assert.equal(r.status, 200);
+    const dir = path.join(ws, ".auto-router", "memory");
+    assert.equal(fs.statSync(path.join(dir, "abcd1234.md")).mode & 0o777, 0o600);
+    assert.equal(fs.statSync(path.join(dir, "INDEX.md")).mode & 0o777, 0o600);
+    assert.equal(fs.statSync(dir).mode & 0o777, 0o700);
+  });
+});

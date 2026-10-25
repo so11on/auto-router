@@ -123,16 +123,19 @@ function writeMemory({ session, markdown, hint, title, workspace }) {
   const ws = workspace && fs.existsSync(workspace) ? workspace : detectWorkspace([{ content: hint || "" }], null, null);
   if (!inAllowedRoot(ws)) throw new Error(`workspace ${ws} is outside BRIDGE_ALLOWED_ROOTS`);
   const dir = memoryDir(ws);
-  fs.mkdirSync(dir, { recursive: true });
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  try { fs.chmodSync(dir, 0o700); fs.chmodSync(path.dirname(dir), 0o700); } catch {}
   ensureGitignore(ws);
   const file = path.join(dir, `${session}.md`);
-  fs.writeFileSync(file, String(markdown || "").slice(0, 200000));
+  fs.writeFileSync(file, String(markdown || "").slice(0, 200000), { mode: 0o600 });
+  try { fs.chmodSync(file, 0o600); } catch {}
   const index = path.join(dir, "INDEX.md");
   let lines = []; try { lines = fs.readFileSync(index, "utf8").split("\n").filter((l) => l.startsWith("- ")); } catch {}
   lines = lines.filter((l) => !l.includes(`(${session}.md)`));
   const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
   lines.unshift(`- ${stamp} · [${session}](${session}.md) · ${String(title || "").replace(/\s+/g, " ").slice(0, 100)}`);
-  fs.writeFileSync(index, "# auto-router memory (newest first)\n\n" + lines.slice(0, 200).join("\n") + "\n");
+  fs.writeFileSync(index, "# auto-router memory (newest first)\n\n" + lines.slice(0, 200).join("\n") + "\n", { mode: 0o600 });
+  try { fs.chmodSync(index, 0o600); } catch {}
   return { workspace: ws, path: path.relative(ws, file) };
 }
 function latestMemory(ws) {

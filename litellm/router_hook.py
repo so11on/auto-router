@@ -248,7 +248,7 @@ def _internal_route(mode: str, s: dict, sensitive: bool):
         if s["safety_mode"] == "on" and privacy == "unsafe":
             return False
         return not sensitive or (privacy in s["sensitive_allowed"] and privacy not in safety.NEVER_SENSITIVE)
-    pool_ok = FREE_POOL_ENABLED and ok(safety.privacy_of("free-pool-fast"))
+    pool_ok = FREE_POOL_ENABLED and not _pool_open("free-pool-fast") and ok(safety.privacy_of("free-pool-fast"))
     if mode == "free" or CLASSIFIER_MODEL == "pool":
         return "pool" if pool_ok else None
     return "paid" if ok(_classifier_privacy()) else (("pool" if pool_ok else None))
@@ -569,15 +569,24 @@ def _memory_markdown(key: str, mode: str, summary: str, messages: list, state_ro
     return "\n".join(lines) + "\n"
 
 
-async def _refresh_memory(key: str, mode: str, messages: list, state_row: dict, hint: str, new_chat: bool):
+def _mask_for_memory(text: str) -> str:
+    """Memory is persistent and re-injected into new chats: secrets AND personal data are masked in it whatever the request settings are."""
+    box = {"prompt": text}
+    res = dlp.scan_and_mask(box, {**safety.settings(), "mask_secrets": "on", "mask_pii": "on"})
+    return "(memory withheld: the scanner failed)" if res.error else box["prompt"]
+
+
+async def _refresh_memory(key: str, mode: str, messages: list, state_row: dict, hint: str, new_chat: bool,
+                          s: dict = None, sensitive: bool = False):
     """Background task: summarize, write .auto-router/memory/<session>.md via the bridge, then publish the state."""
     try:
+        s = s or safety.settings()
         cached = ctxmod._summaries.get(key)
-        summary = cached["summary"] if cached else await _summarize(mode, ctxmod.transcript(messages), None)
+        summary = cached["summary"] if cached else await _summarize(mode, ctxmod.transcript(messages), None, s, sensitive)
         last_user = next((_text(m.get("content")) for m in reversed(messages) if m.get("role") == "user"), "")
-        res = await _post_bridge("/memory/write", {"session": key[:12], "hint": hint[:20000],
-                                                   "title": _request_text(last_user).strip()[:100],
-                                                   "markdown": _memory_markdown(key, mode, summary, messages, state_row)})
+        res = await _post_bridge("/memory/write", {"session": key[:12], "hint": _mask_for_memory(hint[:20000]),
+                                                   "title": _mask_for_memory(_request_text(last_user).strip()[:100]),
+                                                   "markdown": _mask_for_memory(_memory_markdown(key, mode, summary, messages, state_row))})
         state_row.update(memory_file=res.get("path"), workspace=res.get("workspace"))
         _event("memory", session=key[:12], path=res.get("path"), ctx_pct=state_row.get("ctx_pct"))
     except Exception as e:
@@ -875,7 +884,7 @@ class AutoRouter(CustomLogger):
             hint = "\n".join(_text(m.get("content")) for m in messages[:3])
             try:
                 asyncio.get_running_loop().create_task(
-                    _refresh_memory(key, mode, list(data.get("messages") or messages), state_row, hint, new_chat))
+                    _refresh_memory(key, mode, list(data.get("messages") or messages), state_row, hint, new_chat, s, sensitive))
             except RuntimeError:
                 _write_state(state_row)
         else:
