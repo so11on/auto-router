@@ -10,14 +10,14 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const skip = process.platform === "win32" ? "stand-in CLIs are shell scripts" : false;
 
-async function withBridge(fn) {
+async function withBridge(fn, extraEnv = {}) {
   const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ar-bridge-")));
   const ws = path.join(tmp, "proj"); fs.mkdirSync(ws); fs.writeFileSync(path.join(ws, "package.json"), "{}");
   const port = 4300 + Math.floor(Math.random() * 500);
   const child = spawn(process.execPath, [path.join(ROOT, "claude-bridge", "server.mjs")], {
     env: { ...process.env, BRIDGE_PORT: String(port), BRIDGE_KEY: "k", BRIDGE_ALLOWED_ROOTS: tmp, BRIDGE_STATE: path.join(tmp, "state.json"),
       AUTO_ROUTER_DATA: path.join(tmp, "data"), CODEX_BIN: path.join(ROOT, "tests", "fake_codex.sh"), CODEX_MODEL_MAIN: "test-model",
-      COPILOT_BIN: path.join(ROOT, "tests", "fake_copilot.sh"), COPILOT_MODEL_MAIN: "cp-model", GH_TOKEN: "must-be-stripped" },
+      COPILOT_BIN: path.join(ROOT, "tests", "fake_copilot.sh"), COPILOT_MODEL_MAIN: "cp-model", GH_TOKEN: "must-be-stripped", ...extraEnv },
     stdio: "ignore" });
   for (let i = 0; i < 30; i++) { try { if ((await fetch(`http://127.0.0.1:${port}/healthz`)).ok) break; } catch {} await new Promise((r) => setTimeout(r, 100)); }
   try { return await fn({ port, ws, tmp }); } finally { child.kill(); fs.rmSync(tmp, { recursive: true, force: true }); }
@@ -104,4 +104,36 @@ test("model list includes both routes", { skip }, async () => {
     const ids = d.data.map((m) => m.id);
     for (const id of ["claude-code-opus", "codex-code-main", "codex-code-mini", "codex-code-max", "copilot-code-mini", "copilot-code-main", "copilot-code-max"]) assert.ok(ids.includes(id), id);
   });
+});
+
+test("SEC-01: callers cannot pick dangerous permission modes, sandboxes or unknown models", { skip }, async () => {
+  await withBridge(async ({ port, ws }) => {
+    const msgs = [{ role: "system", content: ws }, { role: "user", content: "hi" }];
+    const c = await (await post(port, { model: "claude-code-haiku", tools: [{ type: "function" }], messages: msgs }, { "x-claude-mode": "bypassPermissions" })).json();
+    const text = c.choices[0].message.content;
+    assert.match(text, /--permission-mode acceptEdits/);
+    assert.doesNotMatch(text, /bypassPermissions/);
+    const ok = await (await post(port, { model: "claude-code-haiku", messages: msgs }, { "x-claude-mode": "plan" })).json();
+    assert.match(ok.choices[0].message.content, /--permission-mode plan/);
+    const x = await (await post(port, { model: "codex-code-main", tools: [{ type: "function" }], messages: msgs }, { "x-codex-sandbox": "danger-full-access" })).json();
+    assert.match(x.choices[0].message.content, /workspace-write/);
+    assert.doesNotMatch(x.choices[0].message.content, /danger-full-access/);
+    for (const model of ["--foo", "claude-code-nope", "constructor", "codex-code-nope", "copilot-code-nope"]) {
+      const bad = await post(port, { model, messages: msgs });
+      assert.equal(bad.status, 400, model);
+    }
+  }, { CLAUDE_BIN: path.join(ROOT, "tests", "fake_claude_echo.sh") });
+});
+
+test("SEC-01: the bridge refuses unsafe settings at boot", { skip }, async () => {
+  const run = (env) => new Promise((resolve) => {
+    const c = spawn(process.execPath, [path.join(ROOT, "claude-bridge", "server.mjs")],
+      { env: { ...process.env, BRIDGE_PORT: "4899", BRIDGE_KEY: "k", BRIDGE_ALLOWED_ROOTS: os.tmpdir(), ...env }, stdio: "ignore" });
+    const timer = setTimeout(() => { c.kill(); resolve("running"); }, 1500);
+    c.on("exit", (code) => { clearTimeout(timer); resolve(code); });
+  });
+  assert.equal(await run({ BRIDGE_AGENT_MODE: "bypassPermissions" }), 1);
+  assert.equal(await run({ CODEX_AGENT_SANDBOX: "danger-full-access" }), 1);
+  assert.equal(await run({ BRIDGE_HOST: "0.0.0.0" }), 1);
+  assert.equal(await run({ BRIDGE_HOST: "::" }), 1);
 });

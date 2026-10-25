@@ -97,6 +97,9 @@ router_settings:
 
 litellm_settings:
   drop_params: true
+  # SEC-01: never forward the client's headers to providers/the bridge (x-claude-mode, x-codex-sandbox, x-workspace
+  # would let any local caller steer the agent). Explicit false so a LiteLLM default change cannot enable it.
+  forward_client_headers_to_llm_api: false
   callbacks: router_hook.proxy_handler_instance
 
 general_settings:

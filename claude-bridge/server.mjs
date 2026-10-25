@@ -31,7 +31,14 @@ const CLAUDE_BIN = process.env.CLAUDE_BIN || "claude";
 const ROOTS_RAW = (process.env.BRIDGE_ALLOWED_ROOTS || "").split(",").map((r) => r.trim()).filter(Boolean);
 if (!ROOTS_RAW.length) { console.error("BRIDGE_ALLOWED_ROOTS is required (comma-separated project folders Claude Code may edit)"); process.exit(1); }
 const DEFAULT_CWD = process.env.BRIDGE_DEFAULT_CWD || path.resolve(ROOTS_RAW[0]);
+// Values a caller (header/body) or the env may select. bypassPermissions and danger-full-access are deliberately absent.
+const PERMISSION_MODES = new Set(["plan", "acceptEdits", "default"]);
+const CODEX_SANDBOXES = new Set(["read-only", "workspace-write"]);
+const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 const AGENT_MODE = process.env.BRIDGE_AGENT_MODE || "acceptEdits";
+if (!PERMISSION_MODES.has(AGENT_MODE)) { console.error(`BRIDGE_AGENT_MODE must be one of ${[...PERMISSION_MODES].join(", ")} (bypassPermissions is never allowed)`); process.exit(1); }
+const BRIDGE_HOST = process.env.BRIDGE_HOST || "127.0.0.1";
+if (["0.0.0.0", "::", "[::]", ""].includes(BRIDGE_HOST)) { console.error(`BRIDGE_HOST=${BRIDGE_HOST || "(empty)"} would expose the bridge (and your CLI subscriptions) to the local network. Use 127.0.0.1; on Linux with Docker use the docker0 address.`); process.exit(1); }
 // No shell by default: edits are auto-accepted, commands are not. Opt in with e.g. "Bash(git status:*) Bash(npm test:*)".
 const ALLOWED_TOOLS = process.env.BRIDGE_ALLOWED_TOOLS || "";
 // The bridge only acts inside these directories (comma-separated).
@@ -50,6 +57,7 @@ const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 const CODEX_BIN = process.env.CODEX_BIN || "codex";
 const CODEX_MODELS = { "codex-code-mini": process.env.CODEX_MODEL_MINI || "", "codex-code-main": process.env.CODEX_MODEL_MAIN || "", "codex-code-max": process.env.CODEX_MODEL_MAX || "" };
 const CODEX_AGENT_SANDBOX = process.env.CODEX_AGENT_SANDBOX || "workspace-write"; // used when the request carries tools
+if (!CODEX_SANDBOXES.has(CODEX_AGENT_SANDBOX)) { console.error(`CODEX_AGENT_SANDBOX must be one of ${[...CODEX_SANDBOXES].join(", ")} (danger-full-access is never allowed)`); process.exit(1); }
 // ---- GitHub Copilot CLI (paid Copilot plan) ----
 const COPILOT_BIN = process.env.COPILOT_BIN || "copilot";
 const COPILOT_MODELS = { "copilot-code-mini": process.env.COPILOT_MODEL_MINI || "", "copilot-code-main": process.env.COPILOT_MODEL_MAIN || "", "copilot-code-max": process.env.COPILOT_MODEL_MAX || "" };
@@ -219,9 +227,13 @@ async function handle(req, res, body) {
   const convId = createHash("sha1").update(firstUser).digest("hex");
   const hasTools = Array.isArray(body.tools) && body.tools.length > 0;
   const modeHeader = req.headers["x-claude-mode"];
-  const permission = modeHeader || (hasTools ? AGENT_MODE : "plan");
+  const permission = PERMISSION_MODES.has(modeHeader) ? modeHeader : (hasTools ? AGENT_MODE : "plan");
   const effort = { low: "low", medium: "medium", high: "high", max: "max" }[body.reasoning_effort] || null;
-  const cliModel = MODELS[body.model] || body.model;
+  const cliModel = Object.hasOwn(MODELS, body.model) ? MODELS[body.model] : null;
+  if (!cliModel || !SAFE_ID.test(cliModel)) {
+    res.writeHead(400, { "content-type": "application/json" });
+    return res.end(JSON.stringify({ error: { message: `claude-bridge: unknown model '${String(body.model).slice(0, 60)}'`, type: "invalid_request_error" } }));
+  }
   const stream = body.stream === true;
 
   return withLock(convId, async () => {
@@ -373,10 +385,16 @@ async function handleCodex(req, res, body) {
   const task = textOf(messages[lastUserIdx]?.content).trim();
   const firstUser = textOf(messages.find((m) => m.role === "user")?.content).slice(0, 2000);
   const convId = "codex:" + createHash("sha1").update(firstUser).digest("hex");
-  const sandbox = req.headers["x-codex-sandbox"] || (Array.isArray(body.tools) && body.tools.length ? CODEX_AGENT_SANDBOX : "read-only");
+  const wantedSandbox = req.headers["x-codex-sandbox"];
+  const sandbox = CODEX_SANDBOXES.has(wantedSandbox) ? wantedSandbox : (Array.isArray(body.tools) && body.tools.length ? CODEX_AGENT_SANDBOX : "read-only");
   const effort = { low: "low", medium: "medium", high: "high" }[body.reasoning_effort] || null;
   const stream = body.stream === true;
+  if (!Object.hasOwn(CODEX_MODELS, body.model)) {
+    res.writeHead(400, { "content-type": "application/json" });
+    return res.end(JSON.stringify({ error: { message: `codex-bridge: unknown model '${String(body.model).slice(0, 60)}'`, type: "invalid_request_error" } }));
+  }
   const model = CODEX_MODELS[body.model] || "";
+  if (model && !SAFE_ID.test(model)) { res.writeHead(400); return res.end("codex-bridge: CODEX_MODEL_* has an unsafe value"); }
 
   return withLock(convId, async () => {
     const st = state[convId] || {};
@@ -469,7 +487,12 @@ async function handleCopilot(req, res, body) {
   const convId = "copilot:" + createHash("sha1").update(firstUser).digest("hex");
   const agent = Array.isArray(body.tools) && body.tools.length > 0 && req.headers["x-copilot-mode"] !== "read-only";
   const stream = body.stream === true;
+  if (!Object.hasOwn(COPILOT_MODELS, body.model)) {
+    res.writeHead(400, { "content-type": "application/json" });
+    return res.end(JSON.stringify({ error: { message: `copilot-bridge: unknown model '${String(body.model).slice(0, 60)}'`, type: "invalid_request_error" } }));
+  }
   const model = COPILOT_MODELS[body.model] || "";
+  if (model && !SAFE_ID.test(model)) { res.writeHead(400); return res.end("copilot-bridge: COPILOT_MODEL_* has an unsafe value"); }
 
   return withLock(convId, async () => {
     const st = state[convId] || {};
@@ -581,4 +604,4 @@ http.createServer((req, res) => {
     return;
   }
   res.writeHead(404); res.end("not found");
-}).listen(PORT, "127.0.0.1", () => console.log(`claude-bridge on 127.0.0.1:${PORT}`));
+}).listen(PORT, BRIDGE_HOST, () => console.log(`claude-bridge on ${BRIDGE_HOST}:${PORT}`));
