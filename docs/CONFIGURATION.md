@@ -6,7 +6,7 @@
 | `.env` (from `.env.example`) | secrets and switches; never commit | restart LiteLLM (`docker compose up -d --force-recreate litellm`) and the bridge |
 | `litellm/config.yaml` | model list, fallbacks, timeouts, hook registration | restart LiteLLM |
 | `litellm/routing.yaml` | mode → tiers table | none (read per classification) |
-| `docker-compose.yml` | services and mounts | `docker compose up -d` |
+| `docker-compose.yml` | services, pinned images, the gateway's explicit env list | `docker compose up -d` (a new variable for the gateway must be added to its `environment:` list) |
 
 ## Environment variables (`.env`)
 | Variable | Used by | Meaning |
@@ -30,6 +30,15 @@
 | `AUTO_ROUTER_FOOTER` | hook | `true` (default) appends `*auto-router · <mode> → <group> · <provider/model> · <task> c<n> · <secs>s*` to every final answer; `false` disables. |
 | `EVENT_LOG` | hook | Operation log path in the container (default `/app/data/router.jsonl`). |
 | `ROUTING_FILE` | hook | Path inside the container (default `/app/routing.yaml`). |
+| `SAFETY_MODE` | hook, `ar.mjs` | `on` (default) removes `unsafe` models from every route; `off` allows them. `node ar.mjs safety on\|off`. |
+| `SENSITIVE_GUARD` | hook | `on` (default): secrets / personal data / images restrict the request to allowed privacy classes. |
+| `SENSITIVE_ALLOWED_CLASSES` | hook | Classes that may receive sensitive content, default `trusted` (`no_retention` may be added; `restricted`/`unsafe` never). |
+| `SENSITIVE_MASK_SECRETS`, `SENSITIVE_MASK_PII` | hook | Replace secrets (`on`) / personal data (`off`) by placeholders before any model. |
+| `SENSITIVE_IMAGES` | hook | `trusted_only` (default: an image makes the request sensitive) or `ignore`. |
+| `DLP_FAIL_MODE` | hook | `closed` (default: a scanner failure counts as sensitive) or `open`. |
+| `POOL_FAIL_THRESHOLD`, `POOL_FAIL_WINDOW_S`, `POOL_COOLDOWN_S` | hook | Free-pool circuit breaker (3 failures in 60 s open it for 300 s). |
+| `AR_UMASK` | gateway container | File mode mask for `data/` files, default `077` (Linux: `022` if your user cannot read them). |
+| `BRIDGE_HOST` | bridge | Listen address, default `127.0.0.1`; `0.0.0.0` and `::` are refused. |
 | `BRIDGE_KEY` | bridge, LiteLLM | Required bearer for the bridge; the bridge refuses to start without it. |
 | `BRIDGE_ALLOWED_ROOTS` | bridge | Comma-separated directories where Claude Code may act (required; set by `node ar.mjs init --roots`). |
 
@@ -38,7 +47,7 @@
 |---|---|---|
 | `BRIDGE_PORT` | 4100 | Listen port (always 127.0.0.1). |
 | `BRIDGE_DEFAULT_CWD` | first entry of `BRIDGE_ALLOWED_ROOTS` | Used when no workspace path is found in the conversation. |
-| `BRIDGE_AGENT_MODE` | `acceptEdits` | Claude Code permission mode for requests that carry tools. |
+| `BRIDGE_AGENT_MODE` | `acceptEdits` | Claude Code permission mode for requests that carry tools. Only `plan`, `acceptEdits`, `default`; anything else stops the bridge. |
 | `BRIDGE_ALLOWED_TOOLS` | empty | Extra pre-approved tools, e.g. `Bash(git status:*) Bash(npm test:*)`. Empty = no shell. |
 | `BRIDGE_TIMEOUT_MS` | 600000 | Kill a Claude Code run after this long. |
 | `BRIDGE_STATE` | `~/.auto-router/bridge-state.json` | Session store. |
