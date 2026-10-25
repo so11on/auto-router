@@ -42,7 +42,18 @@ if (["0.0.0.0", "::", "[::]", ""].includes(BRIDGE_HOST)) { console.error(`BRIDGE
 // No shell by default: edits are auto-accepted, commands are not. Opt in with e.g. "Bash(git status:*) Bash(npm test:*)".
 const ALLOWED_TOOLS = process.env.BRIDGE_ALLOWED_TOOLS || "";
 // The bridge only acts inside these directories (comma-separated).
-const norm = (p) => (IS_WIN ? path.resolve(p).toLowerCase() : path.resolve(p));
+// SEC-03: compare real paths on both sides, so a symlink inside a root that points elsewhere is not "inside".
+// A path that does not exist yet resolves through its nearest existing ancestor.
+const realish = (p) => {
+  let cur = path.resolve(p); const rest = [];
+  for (;;) {
+    try { return path.join(fs.realpathSync.native(cur), ...rest.reverse()); } catch {}
+    const up = path.dirname(cur);
+    if (up === cur) return path.resolve(p);
+    rest.push(path.basename(cur)); cur = up;
+  }
+};
+const norm = (p) => (IS_WIN ? realish(p).toLowerCase() : realish(p));
 const ALLOWED_ROOTS = ROOTS_RAW.map(norm);
 const inAllowedRoot = (d) => { const n = norm(d); return ALLOWED_ROOTS.some((r) => n === r || n.startsWith(r + path.sep)); };
 const TIMEOUT_MS = Number(process.env.BRIDGE_TIMEOUT_MS || 10 * 60 * 1000);
@@ -170,21 +181,36 @@ function projectRoot(p) {
   return cur === os.homedir() ? null : cur;
 }
 
+// The VS Code extension writes the focused window's folder here (valid 6 h): a trusted source, unlike text in messages.
+const ACTIVE_WS_FILE = process.env.BRIDGE_ACTIVE_WORKSPACE || path.join(os.homedir(), ".auto-router", "active-workspace.json");
+function activeWorkspace() {
+  try {
+    const { ws, ts } = JSON.parse(fs.readFileSync(ACTIVE_WS_FILE, "utf8"));
+    if (ws && Date.now() - Number(ts) < 6 * 3600 * 1000 && fs.existsSync(ws) && inAllowedRoot(ws)) return ws;
+  } catch {}
+  return null;
+}
+// Priority: x-workspace header → active VS Code window → what this conversation used before → paths found in the
+// conversation (never tool output, and only inside the allowed roots) → the first allowed root.
 function detectWorkspace(messages, header, saved) {
   if (header && fs.existsSync(header)) return header;
+  const active = activeWorkspace();
+  if (active) return active;
+  if (saved && fs.existsSync(saved) && inAllowedRoot(saved)) return saved;
   const counts = new Map();
   // absolute paths: POSIX (/Users, /home, ...) and Windows (C:\\... or C:/...)
   const re = /(?:(?:\/Users|\/home|\/private|\/tmp|\/Volumes|\/mnt|\/workspaces|\/opt|\/srv)\/|[A-Za-z]:[\\/])[^\s"'`)\]},;<>]+/g;
   for (const m of messages) {
+    if (m.role === "tool") continue;
     for (let hit of textOf(m.content).match(re) || []) {
       hit = hit.replace(/[.:]+$/, "");
       if (/[\\/](\.claude|node_modules|Library|AppData)\b/.test(hit)) continue;
       const root = projectRoot(hit);
-      if (root) counts.set(root, (counts.get(root) || 0) + 1);
+      if (root && inAllowedRoot(root)) counts.set(root, (counts.get(root) || 0) + 1);
     }
   }
   const best = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
-  return best?.[0] || saved || DEFAULT_CWD;
+  return best?.[0] || DEFAULT_CWD;
 }
 
 function transcript(msgs) {

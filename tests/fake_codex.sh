@@ -15,5 +15,5 @@ case "$PROMPT" in
 esac
 echo '{"type":"item.completed","item":{"id":"i2","type":"command_execution","command":"ls -la","status":"completed"}}'
 echo '{"type":"item.completed","item":{"id":"i3","type":"file_change","changes":[{"path":"'"$PWD"'/a.txt","kind":"update"}]}}'
-echo '{"type":"item.completed","item":{"id":"i4","type":"agent_message","text":"Done: edited a.txt. ARGS-OK"}}'
+echo '{"type":"item.completed","item":{"id":"i4","type":"agent_message","text":"Done: edited a.txt. ARGS-OK CWD='"$PWD"'"}}'
 echo '{"type":"turn.completed","usage":{"input_tokens":120,"cached_input_tokens":100,"output_tokens":30,"reasoning_output_tokens":0}}'

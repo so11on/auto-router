@@ -17,7 +17,7 @@ async function withBridge(fn, extraEnv = {}) {
   const child = spawn(process.execPath, [path.join(ROOT, "claude-bridge", "server.mjs")], {
     env: { ...process.env, BRIDGE_PORT: String(port), BRIDGE_KEY: "k", BRIDGE_ALLOWED_ROOTS: tmp, BRIDGE_STATE: path.join(tmp, "state.json"),
       AUTO_ROUTER_DATA: path.join(tmp, "data"), CODEX_BIN: path.join(ROOT, "tests", "fake_codex.sh"), CODEX_MODEL_MAIN: "test-model",
-      COPILOT_BIN: path.join(ROOT, "tests", "fake_copilot.sh"), COPILOT_MODEL_MAIN: "cp-model", GH_TOKEN: "must-be-stripped", ...extraEnv },
+      COPILOT_BIN: path.join(ROOT, "tests", "fake_copilot.sh"), COPILOT_MODEL_MAIN: "cp-model", GH_TOKEN: "must-be-stripped", BRIDGE_ACTIVE_WORKSPACE: path.join(tmp, "active-workspace.json"), ...extraEnv },
     stdio: "ignore" });
   for (let i = 0; i < 30; i++) { try { if ((await fetch(`http://127.0.0.1:${port}/healthz`)).ok) break; } catch {} await new Promise((r) => setTimeout(r, 100)); }
   try { return await fn({ port, ws, tmp }); } finally { child.kill(); fs.rmSync(tmp, { recursive: true, force: true }); }
@@ -137,4 +137,28 @@ test("SEC-01: the bridge refuses unsafe settings at boot", { skip }, async () =>
   assert.equal(await run({ CODEX_AGENT_SANDBOX: "danger-full-access" }), 1);
   assert.equal(await run({ BRIDGE_HOST: "0.0.0.0" }), 1);
   assert.equal(await run({ BRIDGE_HOST: "::" }), 1);
+});
+
+test("SEC-03: symlinks out of the roots are refused; tool output does not pick the workspace; the VS Code window does", { skip }, async () => {
+  await withBridge(async ({ port, ws, tmp }) => {
+    const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ar-outside-")));
+    try {
+      const link = path.join(tmp, "link"); fs.symlinkSync(outside, link);
+      const r = await post(port, { model: "codex-code-main", messages: [{ role: "user", content: "hi" }] }, { "x-workspace": link });
+      assert.equal(r.status, 403);
+      const other = path.join(tmp, "other"); fs.mkdirSync(other); fs.writeFileSync(path.join(other, "package.json"), "{}");
+      const ask = async (messages, headers = {}) => (await (await post(port, { model: "codex-code-main", messages }, headers)).json()).choices[0].message.content;
+      const cwdOf = (text) => fs.realpathSync(text.match(/CWD=(\S+)/)[1]);
+      const real = (p) => fs.realpathSync(p);
+      const text1 = await ask([{ role: "system", content: `workspace ${ws}` }, { role: "assistant", content: "ok" },
+        { role: "tool", content: `${other}/a ${other}/b ${other}/c` }, { role: "user", content: "hi 1" }]);
+      assert.equal(cwdOf(text1), real(ws));
+      fs.writeFileSync(path.join(tmp, "active-workspace.json"), JSON.stringify({ ws: other, ts: Date.now() }));
+      const text2 = await ask([{ role: "system", content: `workspace ${ws}` }, { role: "user", content: "hi 2" }]);
+      assert.equal(cwdOf(text2), real(other));
+      fs.writeFileSync(path.join(tmp, "active-workspace.json"), JSON.stringify({ ws: other, ts: Date.now() - 7 * 3600 * 1000 }));
+      const text3 = await ask([{ role: "system", content: `workspace ${ws}` }, { role: "user", content: "hi 3" }]);
+      assert.equal(cwdOf(text3), real(ws), "an active workspace older than 6 h is ignored");
+    } finally { fs.rmSync(outside, { recursive: true, force: true }); }
+  });
 });

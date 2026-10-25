@@ -87,6 +87,8 @@ function activate(context) {
   item.show();
   state = readState();
   render();
+  publishWorkspace();
+  context.subscriptions.push(vscode.window.onDidChangeWindowState((w) => { if (w.focused) publishWorkspace(); }));
   fs.watchFile(statePath(), { interval: 1000 }, onChange);
   context.subscriptions.push(item, log, { dispose: () => fs.unwatchFile(statePath()) },
     vscode.commands.registerCommand("autoRouter.showStatus", () => {
@@ -102,6 +104,19 @@ function activate(context) {
       if (s) openNewChat(s, "manual");
     }));
   log.appendLine(`auto-router companion active; watching ${statePath()}`);
+}
+
+// SEC-03: tell the bridge which folder this window works in (a trusted source, valid 6 h), instead of letting it guess from message text.
+function publishWorkspace() {
+  try {
+    const folder = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0];
+    if (!folder || folder.uri.scheme !== "file") return;
+    const dir = path.join(os.homedir(), ".auto-router");
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const file = path.join(dir, "active-workspace.json");
+    fs.writeFileSync(file, JSON.stringify({ ws: folder.uri.fsPath, ts: Date.now() }), { mode: 0o600 });
+    try { fs.chmodSync(file, 0o600); fs.chmodSync(dir, 0o700); } catch {}
+  } catch {}
 }
 
 function deactivate() {}
