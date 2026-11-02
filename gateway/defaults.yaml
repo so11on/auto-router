@@ -18,6 +18,7 @@ models:
   gemini-flash-lite: {upstream: gemini, id: gemini-3.5-flash-lite, source: google, enabled: false}
   gemini-flash:      {upstream: gemini, id: gemini-3.8-flash,      source: google, enabled: false}
   gemini-pro:        {upstream: gemini, id: gemini-3.1-pro-preview, source: google, enabled: false}
+  gemini-argon:      {upstream: gemini, id: gemini-4-argon,         source: google, enabled: false}   # id verified 2026-11-02
 
 # Decision rule (docs/GATEWAY.md): adequacy first; among adequate models the cheapest for this request; plan/credit balance only
 # breaks ties between adequate models of equivalent quality and cost. Scale: the 0-5 `fit` scale of litellm/models.yaml.
@@ -33,9 +34,8 @@ adequacy:                        # a model's ADEQUACY = fit[task] - these penalt
   context_comfort: 0.5           # above this share of the model's window ...
   context_penalty: 0.5           # ... this penalty (quality drops in very long contexts)
   history_min_samples: 5         # outcomes needed before the learned correction (-1 .. +0.25) applies
-tie:                             # adequate models count as equivalent when both hold; then the funding balance decides
-  cost_ratio: 1.5                # cost within 1.5x of the cheapest adequate model
-  adequacy_delta: 0.5            # adequacy within 0.5 of it
+tie:                             # the cheapest adequate model and the adequate models of equivalent quality form a tie group;
+  adequacy_delta: 0.5            # inside it, expected cost x shadow price (plan/credit balance) decides
 
 # Per-request classes Claude Code announces in x-claude-code-request-class.
 classes:

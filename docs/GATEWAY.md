@@ -41,8 +41,9 @@ Decided with the owner on 2026-11-02, in this order:
 2. **Among adequate models, the cheapest** for this request: expected tokens × list price, with the prompt cache counted. A model
    used in this session within the cache lifetime reads the context at the cached rate; a cold one pays the cache write. If cheap
    models are adequate, they answer. If only an expensive one is, it answers. Never a bigger model "because there is room".
-3. **Plan and credit balance only breaks ties.** It applies between adequate models of equivalent quality and cost (`tie:` in the
-   config: cost within 1.5×, adequacy within 0.5). It keeps any quota from running out early and any credit from expiring unused.
+3. **Plan and credit balance only breaks ties.** It applies between adequate models of equivalent quality (`tie.adequacy_delta`,
+   0.5): inside that group the expected cost of the task × the source's shadow price decides, so Gemini 4 Argon takes Sonnet-level
+   work when the Claude week is tight, and Flash replaces Haiku only when the plan is very tight. It keeps any quota from running out early and any credit from expiring unused.
    It never swaps an adequate model for a less adequate one. Sources and their shadow prices are in `gateway/funding.py`:
    - plan windows (5 h / 7 d, read from Anthropic's `anthropic-ratelimit-unified-*` headers);
    - credit lots with end dates;
@@ -102,7 +103,7 @@ git-ignored; it is merged over the defaults key by key. The main keys:
 |---|---|
 | `models` | candidates: `upstream` (anthropic / gemini), provider `id`, funding `source`, `enabled` |
 | `auto_model` | requests for this model are routed (keep Claude Code's start model = `sonnet`) |
-| `quality`, `adequacy`, `tie` | the weights of the rule above |
+| `quality`, `adequacy`, `tie` | the weights of the rule above; per-model `adequacy_bias` in models.yaml holds the owner's experience |
 | `funding.claude` | `allow_overage` (automatic paid extra usage, default false), `overage: never|ask` |
 | `funding.google` | `currency`, `lots` (remaining, end date: from Cloud Console → Billing → Credits), `prepaid`, `allow_payg`, `horizon_days` |
 | `funding.rates` | local currency units per USD |

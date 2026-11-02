@@ -159,6 +159,21 @@ of a 4.0 requirement and sent medium refactors to Opus.
   extra usage, 3 wait and resume automatically, 4 stop and only notify when the plan is back.
 - The gateway runs from its own venv (Python + PyYAML 6.0.3); the system Python has no PyYAML. 35 MB RSS as a LaunchAgent.
 
+## 2026-11-02 — Model calibration from benchmarks + the owner's experience; Gemini 4 Argon added
+The first gateway table put Gemini Flash level with Sonnet for features (estimated `fit` 4 vs Haiku 2). The owner's experience:
+Haiku ~ Flash (and Flash poor in practice), Gemini Pro below Sonnet, Sonnet ~ Gemini 4 Argon. Checked against current sources:
+- Artificial Analysis Intelligence Index: Opus 5.5 58 (1st), Sonnet 5.5 56, Haiku 5.5 43 at launch (36-38 on index v5),
+  Gemini 3.8 Flash 40-41, Gemini 3.1 Pro preview 30 (artificialanalysis.ai comparisons and the Haiku 5.5 launch article;
+  officechai.com; neuraltrust.ai).
+- Sonnet 5.5 vs Gemini 4 Argon trade wins (Sonnet ahead on terminal and long agentic sessions, cheaper and faster per session;
+  Argon ahead on some repository-scale/agentic benchmarks): benchlm.ai, respan.ai, memeburn.com, bito.ai.
+- Gemini 3.8 Flash: harness-dependent, slow first token (~13 s), up to 30 % more tokens than 3.7 Flash, behind on hard agentic
+  benchmarks (mindstudio.ai, eesel.ai).
+Owner's choices: follow the data for Gemini 3.1 Pro (below Flash), add Argon, and lower Flash by 0.5 (`adequacy_bias`). Haiku and
+Flash now share `fit`; Argon shares Sonnet's (`tools` 4 vs 5). `gemini-4-argon` verified with a real tool call on the billed key
+(HTTP 200, 2.5 s). The tie group is now "equivalent adequacy" only (a cost ratio kept Argon out because it writes ~2x the tokens):
+inside it, expected cost x shadow price decides, so Argon takes Sonnet-level work when the Claude week is tight.
+
 ## Open items
 - Calibrate `fit` with real tasks (ROUTING.md, "Calibration") and measure the CLI overhead.
 - Confirm in real Copilot Chat that the start of the system prompt is stable across turns (conversation id, SEC-02).

@@ -44,6 +44,8 @@ model_list:
     litellm_params: {model: gemini/gemini-3.8-flash, api_key: os.environ/GEMINI_API_KEY, timeout: 120, stream_timeout: 60}
   - model_name: gemini-pro
     litellm_params: {model: gemini/gemini-3.1-pro-preview, api_key: os.environ/GEMINI_API_KEY, timeout: 120, stream_timeout: 60}
+  - model_name: gemini-argon         # id verified with a real call 2026-11-02 (tool call answered in 2.5 s)
+    litellm_params: {model: gemini/gemini-4-argon, api_key: os.environ/GEMINI_API_KEY, timeout: 120, stream_timeout: 60}
 
   # --- Gemini FREE tier (project WITHOUT billing): slow (~20 s) but stable; only the flash-lite model is kept ---
   - model_name: gemini-free-flash-lite

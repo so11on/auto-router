@@ -14,7 +14,8 @@ Newest first. `node ar.mjs update` shows the entries newer than the version inst
   history, "plan is out: 1 best available / 2 wait and resume / 3 paid extra usage" question, resume via `claude --resume`.
   `node ar.mjs gateway install|status|restart|uninstall` (login service) and `node ar.mjs claude-code on|off|status`.
 - `litellm/classify_rules.py`: classifier prompts and heuristic shared by the LiteLLM hook and the gateway; `policy.signals_anthropic`.
-- `models.yaml`: `reasoning` (0-5, estimate) for the Claude and Gemini models.
+- `models.yaml`: `reasoning` (0-5) and a 2026-11-02 calibration (Haiku ~ Flash, Flash `adequacy_bias` -0.5, Sonnet ~ Gemini 4 Argon,
+  Gemini 3.1 Pro below Flash); `gemini-argon` (`gemini-4-argon`, id verified) in `config.yaml` and the gateway.
 - Companion extension **0.4.0**: Explorer → **Add to Claude Code** (files via Claude Code's own @-mention command; folders copied as
   `@path/` to paste). Run `node ar.mjs vscode` and reload VS Code. `docs/VSCODE-SETUP.md` documents Shift-drag (files only) and Option+K.
 

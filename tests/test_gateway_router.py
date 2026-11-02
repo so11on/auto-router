@@ -22,7 +22,7 @@ def snap(u5, u7, reset5=NOW + 3 * 3600, reset7=NOW + 3 * DAY, status="allowed"):
 
 def cfg():
     c = rt.load_config(local_path="/nonexistent")
-    for m in ("gemini-flash-lite", "gemini-flash", "gemini-pro"):
+    for m in ("gemini-flash-lite", "gemini-flash", "gemini-pro", "gemini-argon"):
         c["models"][m]["enabled"] = True
     c["funding"]["google"] = {"kind": "money", "currency": "USD", "lots": [{"remaining": 10, "ends": "2027-06-30"}],
                               "prepaid": {"amount": 8}, "allow_payg": False}
@@ -184,14 +184,33 @@ class Adequacy(unittest.TestCase):
                 self.assertTrue(all(r[3] for r in rows), (task, rows))
                 self.assertLessEqual(max(r[1] for r in rows) - min(r[1] for r in rows), 0.5, (task, rows))
 
-    def test_tie_between_equivalent_models_goes_to_the_source_with_slack(self):
+    def test_tie_group_is_equivalent_quality_and_the_balance_decides_inside_it(self):
         r = make()
         rows = [{"name": "a", "adequacy": 4.0, "adequate": True, "usable": True, "cost": 0.010, "lambda": 0.9},
-                {"name": "b", "adequacy": 3.8, "adequate": True, "usable": True, "cost": 0.012, "lambda": 0.1},
+                {"name": "b", "adequacy": 3.8, "adequate": True, "usable": True, "cost": 0.020, "lambda": 0.1},
                 {"name": "c", "adequacy": 5.0, "adequate": True, "usable": True, "cost": 0.050, "lambda": 0.0}]
-        self.assertEqual(r.choose(rows)["name"], "b")       # a ~ b: the balance decides; c is not equivalent (5x the cost)
+        self.assertEqual(r.choose(rows)["name"], "b")       # a ~ b in quality: 0.009 vs 0.002 after the balance
         rows[1]["adequacy"] = 3.2
         self.assertEqual(r.choose(rows)["name"], "a")       # no longer equivalent: the cheapest adequate wins
+        rows[1]["adequacy"] = 3.8
+        rows[0]["lambda"] = 0.0
+        self.assertEqual(r.choose(rows)["name"], "a")       # c (better, free) is never pulled in: not the same quality
+
+    def test_calibration_2026_11_02(self):
+        """Haiku ~ Flash (Flash -0.5 from the owner's experience), Sonnet ~ Argon, Gemini 3.1 Pro below Flash."""
+        r = make()
+        sess = r._session("x")
+        rows, _ = r.candidates(analysis("feature", 3), 3.0, {"tools": True, "ctx": 20000}, sess, "*")
+        a = {x["name"]: x["adequacy"] for x in rows}
+        self.assertEqual(a["gemini-flash"], a["claude-haiku-cli"] - 0.5)
+        self.assertEqual(a["gemini-argon"], a["claude-sonnet-cli"])
+        self.assertLess(a["gemini-pro"], a["gemini-flash"] + 0.5)
+        self.assertGreater(a["claude-opus-cli"], a["claude-sonnet-cli"])
+
+    def test_sonnet_and_argon_tie_goes_to_the_balance(self):
+        room = make(cls=classifier("feature", 4, depth=4), snapshot=STATES["room"]).decide(req("x"), hdr())
+        tight = make(cls=classifier("feature", 4, depth=4), snapshot=STATES["tight week"]).decide(req("x"), hdr())
+        self.assertEqual({room["model"], tight["model"]}, {"claude-sonnet-cli", "gemini-argon"})
 
     def test_learned_history_lowers_a_model_that_keeps_failing(self):
         r = make()
@@ -314,7 +333,7 @@ class Flow(unittest.TestCase):
 
     def test_nothing_else_allowed_never_pays_by_surprise(self):
         c = cfg()
-        for m in ("gemini-flash-lite", "gemini-flash", "gemini-pro"):
+        for m in ("gemini-flash-lite", "gemini-flash", "gemini-pro", "gemini-argon"):
             c["models"][m]["enabled"] = False
         self.assertEqual(make(conf=c, cls=classifier("qa", 1), snapshot=snap(1.0, 0.5)).decide(req("oi"), hdr())["action"], "answer")
         spent = make(cls=classifier("qa", 1), snapshot=snap(1.0, 0.5), spent=19.0)  # credits + prepayment used, payg off

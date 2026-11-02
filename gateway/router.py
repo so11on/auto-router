@@ -43,9 +43,9 @@ LOCAL_CONFIG = os.environ.get("AR_GATEWAY_CONFIG", os.path.join(ROOT, "config", 
 ROUTING_FILE = os.environ.get("AR_ROUTING_FILE", os.path.join(ROOT, "litellm", "routing.yaml"))
 STATE_TTL = 6 * 3600
 EFFORTS = ("low", "medium", "high")
-TEXT_PINS = {"opus": "claude-opus-cli", "sonnet": "claude-sonnet-cli", "haiku": "claude-haiku-cli", "gemini": "gemini-pro",
-             "pro": "gemini-pro", "flash": "gemini-flash", "lite": "gemini-flash-lite"}
-PIN_RE = re.compile(r"(?:^|\s)!(opus|sonnet|haiku|gemini|pro|flash|lite|esperar|wait)\b", re.I)
+TEXT_PINS = {"opus": "claude-opus-cli", "sonnet": "claude-sonnet-cli", "haiku": "claude-haiku-cli", "gemini": "gemini-argon",
+             "argon": "gemini-argon", "pro": "gemini-pro", "flash": "gemini-flash", "lite": "gemini-flash-lite"}
+PIN_RE = re.compile(r"(?:^|\s)!(opus|sonnet|haiku|gemini|argon|pro|flash|lite|esperar|wait)\b", re.I)
 CWD_RE = re.compile(r"(?:Primary working directory|Working directory|cwd):\s*(/[^\n<]+)")
 OUT_TOKENS = engine.OUTPUT_TOKENS
 
@@ -281,6 +281,10 @@ class Router:
             p = float(w.get("context_penalty", 0.5))
             score -= p
             why["context"] = -p
+        bias = float(spec.get("adequacy_bias", 0) or 0)  # the owner's experience where it differs from benchmarks (models.yaml)
+        if bias:
+            score += bias
+            why["bias"] = bias
         h = self.outcomes.adjustment(proj, task, engine.band_of(int(a.get("complexity", 2))), name,
                                      int(w.get("history_min_samples", 5)))
         if h:
@@ -339,17 +343,17 @@ class Router:
         return rows, rejected
 
     def choose(self, rows: list):
-        """Rule 2 + 3: the cheapest adequate model; among adequate models of equivalent quality and cost, the funding balance
-        (lowest shadow price) decides."""
+        """Rule 2 + 3: the cheapest adequate model; the adequate models of EQUIVALENT QUALITY to it (adequacy within
+        `tie.adequacy_delta`) are its tie group, and inside the group the plan/credit balance decides: expected cost x shadow
+        price. A bigger model is never in the group (its adequacy is higher), so balance never turns into a bazooka."""
         ok = [r for r in rows if r["adequate"] and r["usable"]]
         if not ok:
             return None
         ok.sort(key=lambda r: (r["cost"], -r["adequacy"]))
         first = ok[0]
-        t = self.cfg.get("tie") or {}
-        band = [r for r in ok if r["cost"] <= first["cost"] * float(t.get("cost_ratio", 1.5)) + 1e-9
-                and abs(r["adequacy"] - first["adequacy"]) <= float(t.get("adequacy_delta", 0.5))]
-        return min(band, key=lambda r: (r["lambda"], r["cost"]))
+        delta = float((self.cfg.get("tie") or {}).get("adequacy_delta", 0.5))
+        group = [r for r in ok if abs(r["adequacy"] - first["adequacy"]) <= delta + 1e-9]
+        return min(group, key=lambda r: (r["cost"] * r["lambda"], r["cost"]))
 
     def effort_for(self, name: str, a: dict, bump: bool):
         spec = registry.spec(name)
