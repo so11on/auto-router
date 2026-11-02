@@ -102,6 +102,46 @@ Two review plans were executed in order; the facts of what was and was not verif
 - **Not implemented from the routing plan:** per-project `.auto-router/policy.yaml`; models without a key / verified id (DeepSeek, xAI Grok, Gemini 4 Argon, Llama 4 Maverick, Codestral) exist in `models.yaml` but not in `config.yaml`; `xhigh` effort is sent as `high`.
 - **A model that answers "credit balance too low" is paused for 6 h** instead of being retried on every request (found when the user's Anthropic API key had no credit and Haiku-by-API was the first choice of several cheap cells).
 
+## 2026-11-02 — v0.6 spike: a local gateway inside Claude Code keeps the subscription
+Plan: route inside Claude Code (the person's real client) instead of Copilot Chat; light, no Docker, 100 % local. `gateway/spike_proxy.py`
+(stdlib only) sat between Claude Code 2.1.304 and `api.anthropic.com`, tested with `claude -p` and the claude.ai login, no API key in the env.
+- **Pass-through works.** Requests arrive with `Authorization: Bearer` (OAuth) and `anthropic-beta` containing `oauth-2025-04-20`; SSE streams
+  flow chunk by chunk. With `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1` every request carries `x-claude-code-request-class` (`auxiliary`, `main`),
+  main turns carry `x-claude-code-prompt-id`, and all carry **`x-claude-code-session-id`** (not in the docs page; makes the resume queue need
+  no hook). Every response carries `anthropic-ratelimit-unified-{5h,7d}-{utilization,reset,status}` plus `representative-claim`,
+  `fallback-percentage` and `overage-status`: the plan's real usage, account-wide.
+- **Rewriting only `model` works and stays on the subscription.** Claude Code asked for `claude-sonnet-5-5`; the proxy sent
+  `claude-haiku-5-5`; the stream's `message_start` said `claude-haiku-5-5`; HTTP 200 with the OAuth bearer. Claude Code's own
+  `modelUsage` / `total_cost_usd` still say Sonnet: they are computed client-side, so the gateway's log is the truth for which model served.
+- **Gotcha:** Claude Code sends `Accept-Encoding: gzip`; adding a lower-case `accept-encoding: identity` next to it still got gzip. Drop every
+  case variant first, or the gateway cannot read the stream (served model, usage, errors).
+- **Gemini can serve Claude Code with tools.** `gateway/translate_openai.py` (Anthropic Messages ↔ OpenAI Chat, stdlib) sent a 6-step
+  tool loop (read, edit, run test, 12 Claude Code tools) to `gemini-3.8-flash` on Gemini's OpenAI endpoint: bug fixed, test passed.
+  Gemini 3 thought signatures are kept per tool-call id; calls it never made carry Google's skip placeholder. ~19 K input tokens per
+  call are Claude Code's fixed system prompt + tools (≈ US$ 0.09 for the whole loop on Flash).
+- **Resume works.** `claude -p "<msg>" --resume <session-id>` continued the same session id on the subscription, and a session whose
+  history was written by Gemini (tool calls, no thinking blocks) was accepted by Opus.
+- **Switching Claude models inside a tool loop works** (Opus → Sonnet with Opus thinking blocks in the history: no "bound to a different
+  conversation" error). Cache cost of a switch, measured: the new model re-writes the conversation part (13 K tokens here); the shared
+  prefix (system + tools, 22 K) was already cached for it; going **back** to the previous model within the cache TTL re-read 35 K from
+  cache and wrote 414. So the gateway must track cache warmth **per model** with its TTL, not only "the current model".
+- **Parameters:** Claude Code always sends `thinking`, `output_config` (effort) and `context_management`. With thinking on, Claude rejects
+  `temperature` and `top_p` (HTTP 400): on Claude the levers are effort / thinking budget and `max_tokens`. Gemini's OpenAI endpoint
+  accepts `reasoning_effort` (low/high) together with `temperature`.
+- **Footprint:** the stdlib proxy uses 25 MB RSS idle, 34 MB after a call, ~0.1 s CPU.
+- **Google AI Pro credits (Billing → Credits export, 2026-11-02):** one "Google Developer Program premium benefit" lot of US$ 10 per
+  month, in local currency, scope "all Google Cloud Platform services". Each lot has its **own end date** in the export, which does not
+  always match "one year after grant" from the FAQ, so the funding model reads the dates per lot from the export or from the user, and
+  never computes them. A Gemini API key on the same billing account was already drawing down the oldest lot, so the credit covers the API.
+- A **Cloud Billing prepayment** on the same account is used only after the credits. In the funding model it is the
+  `prepaid_balance` source, after the per-lot `expiring_credit` sources.
+- **The gateway must always be running**, not started by hand: once Claude Code's `ANTHROPIC_BASE_URL` points at it, a stopped gateway
+  breaks Claude Code everywhere (terminal included). Phase 2 installs it as a per-user login service (LaunchAgent on macOS, systemd user
+  unit on Linux, Task Scheduler on Windows) with restart on failure; `ar.mjs claude-code --off` points Claude Code back at Anthropic.
+  This differs from the 2026-10-20 bridge decision (no LaunchAgent) because the gateway holds no shell and listens on loopback only.
+- Companion extension 0.4.0 adds Explorer → **Add to Claude Code**. Checked by the owner: Shift-drag into Claude Code works for files,
+  not for folders; the menu entry appears only after the new .vsix is installed (`node ar.mjs vscode`, or `code --install-extension`).
+
 ## Open items
 - Calibrate `fit` with real tasks (ROUTING.md, "Calibration") and measure the CLI overhead.
 - Confirm in real Copilot Chat that the start of the system prompt is stable across turns (conversation id, SEC-02).

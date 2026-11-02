@@ -104,8 +104,44 @@ function activate(context) {
     vscode.commands.registerCommand("autoRouter.continueInNewChat", () => {
       const s = readState();
       if (s) openNewChat(s, "manual");
-    }));
+    }),
+    vscode.commands.registerCommand("autoRouter.addToClaudeCode", addToClaudeCode));
   log.appendLine(`auto-router companion active; watching ${statePath()}`);
+}
+
+// The Claude Code extension has no Explorer context-menu entry; its own "Insert @-Mention Reference" command only works on the
+// active editor. So each selected file is opened in a preview (focus kept) and that command is run on it. Folders, or a Claude
+// Code version without the command, fall back to `@path` references on the clipboard: the user pastes them into the prompt box.
+async function addToClaudeCode(clicked, selected) {
+  const uris = (selected && selected.length ? selected : [clicked]).filter(Boolean);
+  if (!uris.length) return;
+  const commands = await vscode.commands.getCommands(true);
+  const canInsert = commands.includes("claude-vscode.insertAtMention");
+  const leftovers = [];
+  for (const uri of uris) {
+    let isDir = false;
+    try { isDir = (await vscode.workspace.fs.stat(uri)).type & vscode.FileType.Directory; } catch {}
+    if (isDir || !canInsert) { leftovers.push(uri); continue; }
+    try {
+      await vscode.window.showTextDocument(uri, { preview: true, preserveFocus: false });
+      await vscode.commands.executeCommand("claude-vscode.insertAtMention");
+    } catch (e) {
+      log.appendLine(`addToClaudeCode: ${uri.fsPath}: ${e && e.message}`);
+      leftovers.push(uri);
+    }
+  }
+  if (!leftovers.length) return;
+  const refs = leftovers.map((u) => {
+    const rel = vscode.workspace.asRelativePath(u, false);
+    return "@" + (rel.includes(" ") ? `"${rel}"` : rel) + (isDirSync(u) ? "/" : "");
+  });
+  await vscode.env.clipboard.writeText(refs.join(" ") + " ");
+  if (commands.includes("claude-vscode.focus")) await vscode.commands.executeCommand("claude-vscode.focus");
+  vscode.window.showInformationMessage(`auto-router: ${refs.length} reference(s) copied — paste (Cmd/Ctrl+V) into Claude Code.`);
+}
+
+function isDirSync(uri) {
+  try { return fs.statSync(uri.fsPath).isDirectory(); } catch { return false; }
 }
 
 // SEC-03: tell the bridge which folder this window works in (a trusted source, valid 6 h), instead of letting it guess from message text.

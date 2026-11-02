@@ -2,7 +2,7 @@
   "name": "auto-router-companion",
   "displayName": "auto-router companion",
   "description": "Status bar for auto-router (model, context %, quota) and automatic continuation in a new chat when the context is nearly full.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "publisher": "local",
   "license": "MIT",
   
@@ -14,8 +14,17 @@
     "commands": [
       {"command": "autoRouter.showStatus", "title": "auto-router: Show status"},
       {"command": "autoRouter.openMemory", "title": "auto-router: Open session memory"},
-      {"command": "autoRouter.continueInNewChat", "title": "auto-router: Continue in a new chat now"}
+      {"command": "autoRouter.continueInNewChat", "title": "auto-router: Continue in a new chat now"},
+      {"command": "autoRouter.addToClaudeCode", "title": "Add to Claude Code"}
     ],
+    "menus": {
+      "explorer/context": [
+        {"command": "autoRouter.addToClaudeCode", "group": "claude@1"}
+      ],
+      "commandPalette": [
+        {"command": "autoRouter.addToClaudeCode", "when": "false"}
+      ]
+    },
     "configuration": {
       "title": "auto-router",
       "properties": {

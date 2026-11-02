@@ -2,6 +2,16 @@
 
 Newest first. `node ar.mjs update` shows the entries newer than the version installed on the computer.
 
+## Unreleased (v0.6 in progress, branch `v0.6-claude-gateway`)
+- **Plan for v0.6** in `docs/PLAN-v0.6.md`: routing moves inside Claude Code through a light local gateway (no Docker, 100 % local), a
+  single `auto` profile, a cost model that weighs plan quotas, expiring credits, prepayments and real money, mid-task switching with
+  per-model cache tracking, a per-project `.auto-router/` folder, and an optional "Claude quota is out: use Gemini or wait and resume" flow.
+- **Spike done** (`gateway/spike_proxy.py`, results in `docs/DECISIONS.md`): Claude Code keeps the subscription through a local
+  `ANTHROPIC_BASE_URL`; the gateway may rewrite the model; Gemini can serve Claude Code tool loops; sessions resume with `claude --resume`.
+- `gateway/translate_openai.py`: Anthropic Messages ↔ OpenAI Chat translation (tools, streaming, Gemini 3 thought signatures), with tests.
+- Companion extension **0.4.0**: Explorer → **Add to Claude Code** (files via Claude Code's own @-mention command; folders copied as
+  `@path/` to paste). Run `node ar.mjs vscode` and reload VS Code. `docs/VSCODE-SETUP.md` documents Shift-drag (files only) and Option+K.
+
 ## 0.5.0 — 2026-10-25
 - **Routing v3.** One table for every install: `litellm/routing.yaml` now says, per profile (free / balanced / smart), task type (14) and complexity band, which models may answer, in order. A new engine filters (safety, sensitivity, availability, tools, vision, context, quota, budget), reorders (a plan with room before a billed neighbour), applies a quality floor and a cost rule, and returns fallbacks already filtered. See `docs/ROUTING.md`.
 - `litellm/models.yaml` is now the registry of facts: privacy class, price (with scheduled changes, DeepSeek off-peak, long-context tiers), suitability per task (`fit`, **estimates** until you calibrate), tool / vision reliability, limits.

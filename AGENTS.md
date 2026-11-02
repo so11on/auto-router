@@ -23,6 +23,7 @@ classifies each new user turn (task + complexity 1-5), and `engine.route()` pick
 | Free-tier numbers | `docs/FREE-TIER-LIMITS.md` |
 | Run/debug | `docs/OPERATIONS.md`, `scripts/` |
 | Why a choice was made | `docs/DECISIONS.md` |
+| v0.6 plan (Claude Code gateway, in progress) | `docs/PLAN-v0.6.md`, `gateway/` |
 | Install on another computer (AI-readable) | `INSTALL_WITH_AI.md`, `docs/INSTALL-LESSONS.md` |
 
 ## Commands
