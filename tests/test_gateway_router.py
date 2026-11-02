@@ -10,6 +10,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gateway"))
 import funding  # noqa: E402
 import router as rt  # noqa: E402
+import server  # noqa: E402
 
 NOW = 1_800_000_000.0  # fixed clock (2027-01-15)
 DAY = 86400.0
@@ -122,6 +123,12 @@ class Funding(unittest.TestCase):
             funding.credit_state(src, 0, 0, NOW, rates={})
 
 
+    def test_published_state_is_strict_json(self):
+        import json
+        st = funding.claude_state(snap(1.0, 0.5), NOW)       # an exhausted window has an infinite shadow price
+        out = json.dumps(server._num({"claude": st}), allow_nan=False)   # Node's JSON.parse rejects Infinity / NaN
+        self.assertIn('"exhausted": true', out)
+
     def test_overage_is_not_used_unless_allowed(self):
         sn = dict(snap(1.0, 0.4, status="rejected"), overage="allowed")
         self.assertTrue(funding.claude_state(sn, NOW)["exhausted"])
@@ -195,6 +202,15 @@ class Adequacy(unittest.TestCase):
         rows[1]["adequacy"] = 3.8
         rows[0]["lambda"] = 0.0
         self.assertEqual(r.choose(rows)["name"], "a")       # c (better, free) is never pulled in: not the same quality
+
+    def test_tight_plan_moves_equivalent_work_to_the_other_source_whatever_the_prices(self):
+        """Flash is 17x pricier than Haiku, but in a tight Claude week it takes the work Haiku and Flash can both do."""
+        tight = make(cls=classifier("qa", 1), snapshot=STATES["tight week"]).decide(req("o que é isto?"), hdr())
+        pace = make(cls=classifier("qa", 1), snapshot=STATES["on pace"]).decide(req("o que é isto?"), hdr())
+        self.assertEqual(pace["model"], "claude-haiku-cli")
+        self.assertEqual((tight["model"], tight["source"]), ("gemini-flash", "google"))
+        feat = make(cls=classifier("feature", 3, depth=3), snapshot=STATES["tight week"]).decide(req("x"), hdr())
+        self.assertEqual(feat["model"], "claude-haiku-cli")      # Flash (adequacy 2.5) is below the requirement of 3.0: no swap
 
     def test_calibration_2026_11_02(self):
         """Haiku ~ Flash (Flash -0.5 from the owner's experience), Sonnet ~ Argon, Gemini 3.1 Pro below Flash."""

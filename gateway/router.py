@@ -353,7 +353,10 @@ class Router:
         first = ok[0]
         delta = float((self.cfg.get("tie") or {}).get("adequacy_delta", 0.5))
         group = [r for r in ok if abs(r["adequacy"] - first["adequacy"]) <= delta + 1e-9]
-        return min(group, key=lambda r: (r["cost"] * r["lambda"], r["cost"]))
+        # A source projected to run out before its reset (shadow price above 1) loses to any source that is not, whatever the
+        # prices: the price gap between a small Claude and a small Gemini would otherwise hide the pressure on the plan.
+        press = float((self.cfg.get("tie") or {}).get("pressure_lambda", 1.0))
+        return min(group, key=lambda r: (r["lambda"] > press, r["cost"] * r["lambda"], r["cost"]))
 
     def effort_for(self, name: str, a: dict, bump: bool):
         spec = registry.spec(name)

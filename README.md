@@ -10,6 +10,14 @@ VS Code Copilot Chat ──► gateway (LiteLLM, Docker) ──► free pool (Gr
                                   └─ DLP + routing  └─► Claude / ChatGPT / Copilot (your logins) or API keys
 ```
 
+## New in 0.6 (branch `v0.6-claude-gateway`): `auto` inside Claude Code
+Besides the Copilot Chat route below, a small local gateway (Python + PyYAML, no Docker, ~35 MB) can sit between **Claude Code** and
+its providers and pick the model and effort for every request: **the cheapest model that is adequate for the task**, using your Claude
+plan and your Gemini credits so that neither runs out early nor expires unused, with the Claude subscription login kept. When the plan
+is out it asks: best available model now / Claude paid extra usage / wait and resume automatically / stop and notify.
+Everything stays on your computer. See [docs/GATEWAY.md](docs/GATEWAY.md) (`node ar.mjs gateway install`, `node ar.mjs claude-code on`);
+your own setup (credits, choices) goes in the git-ignored `config/local/gateway.yaml`.
+
 ## Install in 5 minutes (any OS: Windows, macOS, Linux)
 
 **Easiest:** give your AI assistant this link and say *"install this for me"*:

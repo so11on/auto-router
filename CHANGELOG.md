@@ -13,6 +13,8 @@ Newest first. `node ar.mjs update` shows the entries newer than the version inst
   and paid Gemini — adequacy first, cheapest adequate model, plan/credit balance only as a tie-break, mid-task checkpoints, outcome
   history, "plan is out: 1 best available / 2 wait and resume / 3 paid extra usage" question, resume via `claude --resume`.
   `node ar.mjs gateway install|status|restart|uninstall` (login service) and `node ar.mjs claude-code on|off|status`.
+- Tie-break: a source projected to run out before its reset always loses inside the group of equivalent adequate models (Gemini Flash takes
+  simple work from Haiku in a tight Claude week; Argon takes Sonnet-level work).
 - `litellm/classify_rules.py`: classifier prompts and heuristic shared by the LiteLLM hook and the gateway; `policy.signals_anthropic`.
 - `models.yaml`: `reasoning` (0-5) and a 2026-11-02 calibration (Haiku ~ Flash, Flash `adequacy_bias` -0.5, Sonnet ~ Gemini 4 Argon,
   Gemini 3.1 Pro below Flash); `gemini-argon` (`gemini-4-argon`, id verified) in `config.yaml` and the gateway.

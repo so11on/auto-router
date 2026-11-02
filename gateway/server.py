@@ -172,11 +172,10 @@ class Gateway:
             self.last_decisions[sid]["ts"] = time.time()
         claude = self.router.source_state("claude")
         google = self.router.source_state("google") if (self.router.cfg.get("funding") or {}).get("google") else {}
-        state = {"ts": time.time(), "claude": {"lambda": _num(claude.get("lambda")), "exhausted": claude.get("exhausted"),
-                                               "until": claude.get("until"), "windows": claude.get("windows")},
-                 "google": {k: _num(v) for k, v in google.items()},
-                 "sessions": dict(list(self.last_decisions.items())[-50:]), "resume_queue": self.router.resume_queue,
-                 "claude_snapshot": self.router.claude_snapshot}
+        state = _num({"ts": time.time(), "claude": {"lambda": claude.get("lambda"), "exhausted": claude.get("exhausted"),
+                                                    "until": claude.get("until"), "windows": claude.get("windows")},
+                      "google": google, "sessions": dict(list(self.last_decisions.items())[-50:]),
+                      "resume_queue": self.router.resume_queue, "claude_snapshot": self.router.claude_snapshot})
         with _lock:
             os.makedirs(DATA, exist_ok=True)
             tmp = STATE + ".tmp"
@@ -246,7 +245,14 @@ class Gateway:
 
 
 def _num(v):
-    return None if isinstance(v, float) and v == float("inf") else (round(v, 4) if isinstance(v, float) else v)
+    """JSON-safe: infinity (an exhausted window's shadow price) becomes null, floats are rounded, containers are walked."""
+    if isinstance(v, float):
+        return None if v in (float("inf"), float("-inf")) or v != v else round(v, 4)
+    if isinstance(v, dict):
+        return {k: _num(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_num(x) for x in v]
+    return v
 
 
 GW = None  # set in main()

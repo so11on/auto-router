@@ -43,7 +43,10 @@ Decided with the owner on 2026-11-02, in this order:
    models are adequate, they answer. If only an expensive one is, it answers. Never a bigger model "because there is room".
 3. **Plan and credit balance only breaks ties.** It applies between adequate models of equivalent quality (`tie.adequacy_delta`,
    0.5): inside that group the expected cost of the task × the source's shadow price decides, so Gemini 4 Argon takes Sonnet-level
-   work when the Claude week is tight, and Flash replaces Haiku only when the plan is very tight. It keeps any quota from running out early and any credit from expiring unused.
+   work when the Claude week is tight. A source projected to run out before its reset (shadow price above `tie.pressure_lambda`, 1.0)
+   always loses inside the group, whatever the prices: in a tight Claude week Gemini Flash takes the simple work Haiku would do
+   (Haiku is ~17x cheaper per token, so price alone would never move it). Work that Flash is not adequate for (its adequacy is
+   lowered by 0.5 from the owner's experience, so mid-size features) stays on Haiku. It keeps any quota from running out early and any credit from expiring unused.
    It never swaps an adequate model for a less adequate one. Sources and their shadow prices are in `gateway/funding.py`:
    - plan windows (5 h / 7 d, read from Anthropic's `anthropic-ratelimit-unified-*` headers);
    - credit lots with end dates;
