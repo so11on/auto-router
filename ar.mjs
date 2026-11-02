@@ -16,6 +16,8 @@
 //   node ar.mjs smoke                   one real request per profile
 //   node ar.mjs logs [-f] [--errors] [--tail N] [--type T]     operation log
 //   node ar.mjs usage [--since 24h|7d|all] [--by model|mode]   token / usage report and quota forecast
+//   node ar.mjs gateway install|uninstall|restart|status         Claude Code gateway as an always-on login service
+//   node ar.mjs claude-code on|off|status                         point Claude Code at the gateway (backup kept)
 import { spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -1255,8 +1257,144 @@ function usage(flags) {
 }
 
 // ---------------------------------------------------------------- main
+// ---------------------------------------------------------------- v0.6: Claude Code gateway (docs/GATEWAY.md)
+// A light local process (Python + PyYAML in its own venv), always on as a per-user login service; Claude Code reaches it through
+// ANTHROPIC_BASE_URL in ~/.claude/settings.json, so the claude.ai login keeps being used.
+const GW_PORT = 4001;
+const GW_URL = `http://127.0.0.1:${GW_PORT}`;
+const GW_VENV = path.join(HOME_CFG_DIR, "venv");
+const GW_PY = path.join(GW_VENV, IS_WIN ? "Scripts/python.exe" : "bin/python");
+const GW_LABEL = "io.auto-router.gateway";
+const GW_PLIST = path.join(os.homedir(), "Library", "LaunchAgents", `${GW_LABEL}.plist`);
+const GW_UNIT = path.join(os.homedir(), ".config", "systemd", "user", "auto-router-gateway.service");
+const PYYAML = "pyyaml==6.0.3";
+const CLAUDE_SETTINGS = path.join(os.homedir(), ".claude", "settings.json");
+
+function gatewayVenv() {
+  if (fs.existsSync(GW_PY) && run(GW_PY, ["-c", "import yaml"]).status === 0) return true;
+  const py = which("python3") || which("python");
+  if (!py) { bad("Python 3.9+ not found (https://www.python.org/downloads/)"); return false; }
+  info(`creating ${GW_VENV} (Python + ${PYYAML} only)`);
+  if (run(py, ["-m", "venv", GW_VENV]).status !== 0) { bad("python -m venv failed"); return false; }
+  if (run(GW_PY, ["-m", "pip", "install", "-q", PYYAML]).status !== 0) { bad(`pip install ${PYYAML} failed`); return false; }
+  return true;
+}
+
+function xmlEsc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+
+async function gatewayHealthy(timeout = 2000) {
+  const r = await http(`${GW_URL}/health`, { timeout });
+  return r.status === 200;
+}
+
+async function gatewayCmd(flags, rest) {
+  const sub = rest[1] || "status";
+  const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+  // PATH for the service: `claude` (resume after the plan resets) and osascript/notify-send must be found
+  const claudeDir = which("claude") ? path.dirname(which("claude")) : "";
+  const svcPath = [claudeDir, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"].filter(Boolean).join(":");
+  if (sub === "install") {
+    if (!gatewayVenv()) return;
+    fs.mkdirSync(DATA, { recursive: true });
+    const logf = path.join(DATA, "gateway.log");
+    if (process.platform === "darwin") {
+      const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>${GW_LABEL}</string>
+  <key>ProgramArguments</key><array><string>${xmlEsc(GW_PY)}</string><string>${xmlEsc(path.join(ROOT, "gateway", "server.py"))}</string></array>
+  <key>WorkingDirectory</key><string>${xmlEsc(ROOT)}</string>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>${xmlEsc(svcPath)}</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>${xmlEsc(logf)}</string>
+  <key>StandardErrorPath</key><string>${xmlEsc(logf)}</string>
+</dict></plist>
+`;
+      fs.mkdirSync(path.dirname(GW_PLIST), { recursive: true });
+      run("launchctl", ["bootout", `gui/${uid}/${GW_LABEL}`]);
+      fs.writeFileSync(GW_PLIST, plist, { mode: 0o644 });
+      const r = run("launchctl", ["bootstrap", `gui/${uid}`, GW_PLIST]);
+      if (r.status !== 0) return bad(`launchctl bootstrap failed: ${(r.stderr || "").trim()}`);
+    } else if (process.platform === "linux") {
+      const unit = `[Unit]\nDescription=auto-router gateway (Claude Code)\n\n[Service]\nExecStart=${GW_PY} ${path.join(ROOT, "gateway", "server.py")}\nWorkingDirectory=${ROOT}\nEnvironment=PATH=${svcPath}\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n`;
+      fs.mkdirSync(path.dirname(GW_UNIT), { recursive: true });
+      fs.writeFileSync(GW_UNIT, unit);
+      run("systemctl", ["--user", "daemon-reload"]);
+      const r = run("systemctl", ["--user", "enable", "--now", "auto-router-gateway.service"]);
+      if (r.status !== 0) return bad("systemctl --user enable failed");
+    } else {
+      warn("Windows: the login service is not automated yet (not tested). Start it with:");
+      return info(`"${GW_PY}" "${path.join(ROOT, "gateway", "server.py")}"`);
+    }
+    for (let i = 0; i < 20; i++) { await sleep(500); if (await gatewayHealthy()) return ok(`gateway running on ${GW_URL} (starts at login, restarts on failure; log: data/gateway.log)`); }
+    return bad("the gateway did not answer — see data/gateway.log");
+  }
+  if (sub === "uninstall") {
+    if (process.platform === "darwin") { run("launchctl", ["bootout", `gui/${uid}/${GW_LABEL}`]); try { fs.unlinkSync(GW_PLIST); } catch {} }
+    else if (process.platform === "linux") { run("systemctl", ["--user", "disable", "--now", "auto-router-gateway.service"]); try { fs.unlinkSync(GW_UNIT); } catch {} }
+    return ok("gateway service removed (run `node ar.mjs claude-code off` too if Claude Code still points at it)");
+  }
+  if (sub === "restart") {
+    if (process.platform === "darwin") run("launchctl", ["kickstart", "-k", `gui/${uid}/${GW_LABEL}`]);
+    else if (process.platform === "linux") run("systemctl", ["--user", "restart", "auto-router-gateway.service"]);
+    for (let i = 0; i < 20; i++) { await sleep(500); if (await gatewayHealthy()) return ok("gateway restarted"); }
+    return bad("the gateway did not answer — see data/gateway.log");
+  }
+  // status
+  if (!(await gatewayHealthy())) return bad(`gateway not answering on ${GW_URL} — node ar.mjs gateway install`);
+  ok(`gateway answering on ${GW_URL}`);
+  const st = await http(`${GW_URL}/state`, { timeout: 3000 });
+  const s = st.json || {};
+  const w = (s.claude && s.claude.windows) || {};
+  const pct = (x) => (x && x.utilization != null ? `${Math.round(x.utilization * 100)}%` : "?");
+  info(`Claude plan: 5h ${pct(w["5h"])} · 7d ${pct(w["7d"])}${s.claude && s.claude.exhausted ? " · EXHAUSTED until " + new Date(s.claude.until * 1000).toLocaleString() : ""}`);
+  if (s.google && s.google.kind) info(`Google: ${s.google.kind}, ≈ US$ ${Number(s.google.remaining_usd || 0).toFixed(2)} left${s.google.lot_ends ? ", oldest lot ends " + new Date(s.google.lot_ends * 1000).toLocaleDateString() : ""}`);
+  for (const [sid, d] of Object.entries(s.sessions || {}).slice(-5)) info(`session ${sid.slice(0, 8)}: ${d.model} (${d.effort || "-"}) · ${d.task || ""} · ${d.reason}`);
+  if ((s.resume_queue || []).length) info(`resume queued: ${s.resume_queue.map((r) => path.basename(r.cwd) + " at " + new Date(r.at * 1000).toLocaleString()).join(", ")}`);
+}
+
+function readClaudeSettings() {
+  try { return JSON.parse(fs.readFileSync(CLAUDE_SETTINGS, "utf8")); } catch (e) { if (fs.existsSync(CLAUDE_SETTINGS)) throw e; return {}; }
+}
+
+async function claudeCodeCmd(flags, rest) {
+  const sub = rest[1] || "status";
+  const s = readClaudeSettings();
+  const env = s.env || {};
+  const on = env.ANTHROPIC_BASE_URL === GW_URL;
+  if (sub === "status") {
+    info(`Claude Code → ${on ? "auto-router gateway (" + GW_URL + ")" : env.ANTHROPIC_BASE_URL ? env.ANTHROPIC_BASE_URL : "Anthropic directly"}`);
+    info(`start model: ${s.model || "(default)"}`);
+    if (on && !(await gatewayHealthy())) bad("the gateway is NOT answering: Claude Code requests will fail — node ar.mjs gateway install, or node ar.mjs claude-code off");
+    return;
+  }
+  if (sub !== "on" && sub !== "off") return bad("usage: node ar.mjs claude-code on|off|status");
+  if (sub === "on" && !flags.force && !(await gatewayHealthy())) return bad("the gateway is not answering — run: node ar.mjs gateway install (or pass --force)");
+  const backup = `${CLAUDE_SETTINGS}.bak-auto-router-${new Date().toISOString().slice(0, 10)}`;
+  if (fs.existsSync(CLAUDE_SETTINGS) && !fs.existsSync(backup)) fs.copyFileSync(CLAUDE_SETTINGS, backup);
+  const next = { ...s, env: { ...env } };
+  if (sub === "on") {
+    next.env.ANTHROPIC_BASE_URL = GW_URL;
+    next.env.CLAUDE_CODE_GATEWAY_HINT_HEADERS = "1";
+    if (!next.model || /opus/i.test(next.model)) next.model = "sonnet"; // the gateway's auto_model: requests for it are routed by `auto`
+  } else {
+    if (next.env.ANTHROPIC_BASE_URL === GW_URL) delete next.env.ANTHROPIC_BASE_URL;
+    delete next.env.CLAUDE_CODE_GATEWAY_HINT_HEADERS;
+  }
+  if (!Object.keys(next.env).length) delete next.env;
+  fs.mkdirSync(path.dirname(CLAUDE_SETTINGS), { recursive: true });
+  fs.writeFileSync(CLAUDE_SETTINGS, JSON.stringify(next, null, 2) + "\n", { mode: 0o600 });
+  ok(sub === "on" ? `Claude Code now goes through the gateway (${GW_URL}); new sessions pick it up. Undo: node ar.mjs claude-code off`
+    : "Claude Code talks to Anthropic directly again (new sessions)");
+  info(`backup: ${backup}`);
+}
+
 const HELP = `auto-router — node ar.mjs <command>
 
+  gateway     install|uninstall|restart|status   the Claude Code gateway (auto routing) as an always-on login service
+  claude-code on|off|status   point Claude Code at the gateway; off = straight to Anthropic again
   doctor      check Docker, Node, Claude CLI, VS Code, ports
   init        --roots <folders> [--safety on|off] [--profile A-F|auto] [--families claude,openai,copilot,gemini] [--pool yes|no] [--claude cli|api|none] [--openai cli|api|none] [--force]
   keys        [--check] show which keys are set; --check tests each one against its provider
@@ -1302,6 +1440,8 @@ async function main() {
     case "logs": return logs(flags);
     case "usage": return usage(flags);
     case "tune": return tune(flags);
+    case "gateway": return gatewayCmd(flags, rest);
+    case "claude-code": return claudeCodeCmd(flags, rest);
     default: console.log(HELP); process.exitCode = cmd ? 1 : 0;
   }
 }

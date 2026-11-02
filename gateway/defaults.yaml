@@ -1,0 +1,77 @@
+# Claude Code gateway: generic defaults (committed). Your own setup goes in config/local/gateway.yaml (git-ignored), which is
+# merged over this file key by key. docs/PLAN-v0.6.md explains the design; docs/GATEWAY.md how to run it.
+
+listen: {host: 127.0.0.1, port: 4001}
+
+# Requests that ask for this model are routed by `auto`. Any other Claude model chosen in Claude Code's picker is a pin and is
+# sent as asked. Keep this equal to the model Claude Code starts on (settings.json "model": "sonnet").
+auto_model: claude-sonnet-5-5
+
+# Candidates `auto` may choose. key = model name in litellm/models.yaml (price, fit, tools, privacy, effort table abbr).
+#   upstream: anthropic (pass-through with the claude.ai login) | gemini (translated to Gemini's OpenAI endpoint, GEMINI_API_KEY)
+#   id: the provider's model id (verified by a real call before adding: AGENTS.md invariant 7)
+#   source: which funding source pays (see `funding`)
+models:
+  claude-haiku-cli:  {upstream: anthropic, id: claude-haiku-5-5,  source: claude}
+  claude-sonnet-cli: {upstream: anthropic, id: claude-sonnet-5-5, source: claude}
+  claude-opus-cli:   {upstream: anthropic, id: claude-opus-5-5,   source: claude}
+  gemini-flash-lite: {upstream: gemini, id: gemini-3.5-flash-lite, source: google, enabled: false}
+  gemini-flash:      {upstream: gemini, id: gemini-3.8-flash,      source: google, enabled: false}
+  gemini-pro:        {upstream: gemini, id: gemini-3.1-pro-preview, source: google, enabled: false}
+
+# Decision rule (docs/GATEWAY.md): adequacy first; among adequate models the cheapest for this request; plan/credit balance only
+# breaks ties between adequate models of equivalent quality and cost. Scale: the 0-5 `fit` scale of litellm/models.yaml.
+quality:                         # the REQUIREMENT = adjusted complexity + these
+  criticality_offset: {draft: -1, normal: 0, critical: 1}   # from <project>/.auto-router/policy.yaml
+  risk_offset: 0.5               # production, migrations, payments, security, credentials, personal data
+  uncertainty_floor: 0.3         # classifier uncertainty (0-1) up to this adds nothing ...
+  uncertainty_margin: 1.0        # ... above it, up to this much at uncertainty 1.0 (the keyword fallback says 0.8: +0.71)
+  failure_step: 1.0              # repeated tool errors or a loop inside the task
+adequacy:                        # a model's ADEQUACY = fit[task] - these penalties + learned history
+  reasoning_gap: 0.75            # per point the task's reasoning depth exceeds the model's `reasoning`
+  tools_gap: 0.5                 # per point of tool reliability below what the task's tool intensity needs (1:3, 2:4, 3:5)
+  context_comfort: 0.5           # above this share of the model's window ...
+  context_penalty: 0.5           # ... this penalty (quality drops in very long contexts)
+  history_min_samples: 5         # outcomes needed before the learned correction (-1 .. +0.25) applies
+tie:                             # adequate models count as equivalent when both hold; then the funding balance decides
+  cost_ratio: 1.5                # cost within 1.5x of the cheapest adequate model
+  adequacy_delta: 0.5            # adequacy within 0.5 of it
+
+# Per-request classes Claude Code announces in x-claude-code-request-class.
+classes:
+  auxiliary: claude-haiku-cli    # titles, summaries, internal classifiers
+  explore: claude-haiku-cli      # the built-in Explore subagent (x-claude-code-agent-type: Explore)
+
+# Mid-task switching (PLAN 2B): reuses litellm/routing.yaml `switching` values unless set here.
+switching:
+  checkpoint_every: 4
+  min_steps_between_switches: 3
+  downgrade_confirmations: 2
+  cache_ttl_s: 300               # Anthropic's default prompt-cache lifetime: a model used within it is "warm"
+
+classifier:
+  model: gemini-flash-lite       # a key of `models` with upstream gemini; empty = local heuristic only
+  max_chars: 4000
+  timeout_s: 8
+
+# Funding sources and their shadow prices (PLAN 3b). Values here are examples of the SHAPE only.
+funding:
+  base: {window_quota: 0.2, expiring_credit: 0.4, prepaid_balance: 0.8, payg: 1.0}
+  rates: {}                      # local currency units per USD, e.g. {BRL: 5.8}
+  claude:
+    kind: window_quota
+    allow_overage: false         # true = paid "extra usage" past the plan limit is used automatically, like any paid source
+    overage: never               # never | ask: offer it as option 3 when the plan is out and only Claude is adequate
+  google:
+    kind: money
+    currency: USD
+    lots: []                     # [{remaining: 10, ends: "2027-01-31"}] from Cloud Console > Billing > Credits (export)
+    prepaid: null                # {amount: 10}
+    allow_payg: false            # never charge the card unless you say so
+    horizon_days: 30             # a lot gets cheaper only in its last N days, in proportion to what would expire unused
+
+# What happens when the Claude plan is used up (PLAN 3).
+on_claude_exhausted:            # only when the ADEQUATE models are all Claude (an adequate Gemini is simply used)
+  ask: true                      # ask "1 = best available now / 2 = wait and resume"
+  resume: true                   # "2" queues `claude --resume` for when the plan resets
+  resume_margin_s: 120

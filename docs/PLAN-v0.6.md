@@ -1,4 +1,6 @@
 <!-- Plano aprovado pelo dono em 2026-11-02 (pt-BR, escrito junto com ele). Medições do spike: docs/DECISIONS.md, 2026-11-02. -->
+> **Revisto em 2026-11-02:** a regra de escolha passou a ser "adequação primeiro; entre os adequados, o mais barato; equilíbrio de cotas só desempata; sem a opção de folga". A regra em vigor está em `docs/GATEWAY.md`; os itens 3b ("aproveitar folga") e o preço-sombra como critério principal abaixo ficam substituídos.
+
 # Plano: auto-router v0.6, roteamento automático dentro do Claude Code, leve e 100% local
 
 ## Contexto

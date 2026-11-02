@@ -23,7 +23,7 @@ classifies each new user turn (task + complexity 1-5), and `engine.route()` pick
 | Free-tier numbers | `docs/FREE-TIER-LIMITS.md` |
 | Run/debug | `docs/OPERATIONS.md`, `scripts/` |
 | Why a choice was made | `docs/DECISIONS.md` |
-| v0.6 plan (Claude Code gateway, in progress) | `docs/PLAN-v0.6.md`, `gateway/` |
+| Claude Code gateway (`auto`), v0.6 | `docs/GATEWAY.md`, `gateway/` (+ `tests/test_gateway_router.py`), plan in `docs/PLAN-v0.6.md` |
 | Install on another computer (AI-readable) | `INSTALL_WITH_AI.md`, `docs/INSTALL-LESSONS.md` |
 
 ## Commands
@@ -54,6 +54,7 @@ docker compose up -d --force-recreate litellm  # after editing config.yaml / rou
 10. Pins (`pins:` in routing.yaml) never let `auto-free` reach a paid model and never override safety / sensitivity / availability; keep those checks in `async_pre_call_hook`.
 12. `docker-compose.yml`: images pinned by digest (never `:latest` / `:main-stable`), the gateway gets an explicit `environment:` list (no `env_file`); `ar.mjs update` never changes an `image:` line. OmniRoute is used only through the surface in `docs/OMNIROUTE-CONTRACT.md`.
 13. Prices, privacy classes, fit and limits are data in `models.yaml`; never hard-code a model's facts in Python.
+14. Gateway (`gateway/`): adequacy decides, money/quota only breaks ties between equivalent adequate models; never rewrite `messages`/`system`/`tools` of a Claude request (cache + thinking); never use Claude paid extra usage unless `allow_overage`; stdlib + PyYAML only; loopback only.
 11. Streaming failover: `router_hook.async_post_call_streaming_iterator_hook` continues a broken answer on the next fallback; keep it Chat-Completions-only unless you test the other formats.
 
 ## Conventions

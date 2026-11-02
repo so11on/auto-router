@@ -142,6 +142,22 @@ Plan: route inside Claude Code (the person's real client) instead of Copilot Cha
 - Companion extension 0.4.0 adds Explorer → **Add to Claude Code**. Checked by the owner: Shift-drag into Claude Code works for files,
   not for folders; the menu entry appears only after the new .vsix is installed (`node ar.mjs vscode`, or `code --install-extension`).
 
+## 2026-11-02 — Gateway decision rule: adequacy first, cheapest adequate, balance only as tie-break
+A first version let the plan/credit shadow price multiply cost by up to 5x among every model that merely "passed" an integer fit
+floor, plus a "use the slack" upgrade. The owner rejected it: the quota state was deciding, not the task. The rule now is
+(docs/GATEWAY.md): (1) a continuous adequacy score per model against a requirement built from a richer task analysis
+(reasoning depth, uncertainty, tool intensity, risk, project criticality, failures, learned outcome history); (2) the cheapest
+adequate model; (3) funding balance only between adequate models of equivalent quality and cost; (4) ask only when the adequate
+models are all out of quota. No slack upgrade. An uncertainty margin applies only above 0.3: a 0.1 doubt pushed fit-4 models out
+of a 4.0 requirement and sent medium refactors to Opus.
+- Credit lots get cheaper only inside `horizon_days` (30) of their end date: with no spending history every lot looked like
+  "expiring unused" and priced at 0.
+- **Claude extra usage.** On 2026-11-02 the 5 h window reached `utilization 1.0, status rejected` while requests were still served
+  (`overage-status: allowed`): paid extra usage. The owner keeps it as an emergency reserve (auto-reload with a monthly cap), so the
+  gateway treats the plan as exhausted unless `allow_overage`, also for picker/text pins, and offers it only as option 3 of the
+  "plan is out" question (`overage: ask`).
+- The gateway runs from its own venv (Python + PyYAML 6.0.3); the system Python has no PyYAML. 35 MB RSS as a LaunchAgent.
+
 ## Open items
 - Calibrate `fit` with real tasks (ROUTING.md, "Calibration") and measure the CLI overhead.
 - Confirm in real Copilot Chat that the start of the system prompt is stable across turns (conversation id, SEC-02).

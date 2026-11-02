@@ -9,6 +9,12 @@ Newest first. `node ar.mjs update` shows the entries newer than the version inst
 - **Spike done** (`gateway/spike_proxy.py`, results in `docs/DECISIONS.md`): Claude Code keeps the subscription through a local
   `ANTHROPIC_BASE_URL`; the gateway may rewrite the model; Gemini can serve Claude Code tool loops; sessions resume with `claude --resume`.
 - `gateway/translate_openai.py`: Anthropic Messages ↔ OpenAI Chat translation (tools, streaming, Gemini 3 thought signatures), with tests.
+- **Claude Code gateway** (`gateway/server.py`, `router.py`, `funding.py`; `docs/GATEWAY.md`): `auto` routing between the Claude plan
+  and paid Gemini — adequacy first, cheapest adequate model, plan/credit balance only as a tie-break, mid-task checkpoints, outcome
+  history, "plan is out: 1 best available / 2 wait and resume / 3 paid extra usage" question, resume via `claude --resume`.
+  `node ar.mjs gateway install|status|restart|uninstall` (login service) and `node ar.mjs claude-code on|off|status`.
+- `litellm/classify_rules.py`: classifier prompts and heuristic shared by the LiteLLM hook and the gateway; `policy.signals_anthropic`.
+- `models.yaml`: `reasoning` (0-5, estimate) for the Claude and Gemini models.
 - Companion extension **0.4.0**: Explorer → **Add to Claude Code** (files via Claude Code's own @-mention command; folders copied as
   `@path/` to paste). Run `node ar.mjs vscode` and reload VS Code. `docs/VSCODE-SETUP.md` documents Shift-drag (files only) and Option+K.
 
