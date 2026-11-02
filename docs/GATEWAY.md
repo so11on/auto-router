@@ -48,10 +48,13 @@ Decided with the owner on 2026-11-02, in this order:
    - credit lots with end dates;
    - prepayment;
    - card.
-4. **The Claude plan is out and only a Claude model is adequate:** the gateway answers with a question:
-   - **1**: the best available model now;
-   - **2**: wait; it resumes the session with `claude --resume` when the plan resets and sends a desktop notification;
-   - **3**, only when `funding.claude.overage: ask`: Claude's paid extra usage.
+4. **The Claude plan is out and only a Claude model is adequate:** the gateway answers with a question. The numbers are fixed; an
+   option that is not possible right now is left out, and the others keep their numbers:
+   - **1**: the best available model now (Gemini), kept for the session until the plan is back;
+   - **2**: Claude's paid extra usage (the owner's emergency reserve), only when Anthropic would serve it and
+     `funding.claude.overage: ask`;
+   - **3**: wait; the gateway resumes the session with `claude --resume` when the plan resets and sends a desktop notification;
+   - **4**: stop; the gateway sends a notification when the plan is back, and the person continues by hand.
 
    An adequate Gemini is simply used, without asking.
 
@@ -72,7 +75,7 @@ errors or a loop) the remaining work is re-analysed:
 **Pins:**
 - A Claude model chosen in Claude Code's picker, other than `auto_model`, is sent as asked.
 - `!opus`, `!sonnet`, `!haiku`, `!pro`, `!flash` and `!lite` in a message pin that prompt.
-- `!esperar` queues the resume.
+- `!esperar` is option 3 at any time.
 
 ## Commands
 ```sh

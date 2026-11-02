@@ -208,6 +208,10 @@ class Gateway:
                 threading.Thread(target=self._resume, args=(r, port), daemon=True).start()
 
     def _resume(self, r: dict, port: int):
+        if r.get("mode") == "notify":  # option 4: the person continues by hand
+            notify("auto-router", "A cota do Claude voltou. Pode mandar continuar em " + os.path.basename(r.get("cwd") or "") + ".")
+            log({"event": "plan_back_notified", "session": r["session"][:8]})
+            return
         claude = shutil.which("claude")
         if not claude or not os.path.isdir(r["cwd"]):
             log({"event": "resume_failed", "session": r["session"][:8], "why": "no claude CLI or folder"})

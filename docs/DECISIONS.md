@@ -154,8 +154,9 @@ of a 4.0 requirement and sent medium refactors to Opus.
   "expiring unused" and priced at 0.
 - **Claude extra usage.** On 2026-11-02 the 5 h window reached `utilization 1.0, status rejected` while requests were still served
   (`overage-status: allowed`): paid extra usage. The owner keeps it as an emergency reserve (auto-reload with a monthly cap), so the
-  gateway treats the plan as exhausted unless `allow_overage`, also for picker/text pins, and offers it only as option 3 of the
-  "plan is out" question (`overage: ask`).
+  gateway treats the plan as exhausted unless `allow_overage`, also for picker/text pins, and offers it only as an option of the
+  "plan is out" question (`overage: ask`). The owner's four options, fixed numbers: 1 best available now (Gemini), 2 Claude paid
+  extra usage, 3 wait and resume automatically, 4 stop and only notify when the plan is back.
 - The gateway runs from its own venv (Python + PyYAML 6.0.3); the system Python has no PyYAML. 35 MB RSS as a LaunchAgent.
 
 ## Open items

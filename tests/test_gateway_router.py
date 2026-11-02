@@ -268,42 +268,49 @@ class Flow(unittest.TestCase):
         d = r.decide(req("agrupe este csv", tools=False), hdr())
         self.assertEqual((d["action"], d["source"]), ("forward", "google"))
 
-    def test_claude_out_and_only_claude_adequate_asks(self):
-        r = make(cls=classifier("debug", 4, depth=5), snapshot=snap(1.0, 0.6))
+    def _ask_then(self, choice, conf=None, snapshot=None, system="Primary working directory: /tmp/proj"):
+        r = make(conf=conf, cls=classifier("debug", 4, depth=5), snapshot=snapshot or snap(1.0, 0.6))
         d = r.decide(req("ache a race condition"), hdr("p1"))
-        self.assertEqual(d["action"], "answer")
-        self.assertIn("Responda **1**", d["text"])
         msgs = req("x").get("messages") + [{"role": "assistant", "content": [{"type": "text", "text": d["text"]}]},
-                                           {"role": "user", "content": [{"type": "text", "text": "1"}]}]
-        d1 = r.decide(req(messages=msgs), hdr("p2"))
-        self.assertEqual((d1["action"], d1["upstream"]), ("forward", "gemini"))
-        self.assertEqual(d1["task"], "debug")
-        d2 = r.decide(req(messages=tool_step(msgs)), hdr("p2"))        # keeps the chosen model while Claude is out
-        self.assertEqual(d2["model"], d1["model"])
+                                           {"role": "user", "content": [{"type": "text", "text": choice}]}]
+        return r, d, msgs, r.decide(req(messages=msgs, system=system), hdr("p2"))
 
-    def test_claude_out_offers_paid_extra_usage_only_when_configured(self):
-        out = dict(snap(1.0, 0.6, status="rejected"), overage="allowed")
-        d = make(cls=classifier("debug", 4, depth=5), snapshot=out).decide(req("x"), hdr("p1"))
-        self.assertNotIn("**3**", d["text"])                    # default: never offered
+    def test_claude_out_and_only_claude_adequate_asks_four_options(self):
         c = cfg()
         c["funding"]["claude"]["overage"] = "ask"
-        r = make(conf=c, cls=classifier("debug", 4, depth=5), snapshot=out)
-        d = r.decide(req("x"), hdr("p1"))
-        self.assertIn("**3**", d["text"])
-        msgs = req("x").get("messages") + [{"role": "assistant", "content": [{"type": "text", "text": d["text"]}]},
-                                           {"role": "user", "content": [{"type": "text", "text": "3"}]}]
-        d3 = r.decide(req(messages=msgs), hdr("p2"))
-        self.assertEqual((d3["upstream"], d3["reason"]), ("anthropic", "chosen: Claude extra usage (paid, emergency)"))
-        self.assertEqual(r.decide(req(messages=tool_step(msgs)), hdr("p2"))["model"], d3["model"])
+        r, d, msgs, _ = self._ask_then("x", conf=c, snapshot=dict(snap(1.0, 0.6, status="rejected"), overage="allowed"))
+        self.assertEqual(d["action"], "answer")
+        for n in ("**1**", "**2**", "**3**", "**4**"):
+            self.assertIn(n, d["text"])
+        _, d2, _, _ = self._ask_then("x")               # overage not configured: option 2 left out, the others keep their numbers
+        self.assertNotIn("**2**", d2["text"])
+        self.assertIn("**4**", d2["text"])
 
-    def test_claude_out_wait_queues_resume(self):
-        r = make(cls=classifier("debug", 4, depth=5), snapshot=snap(1.0, 0.6))
-        d = r.decide(req("x"), hdr("p1"))
-        msgs = req("x").get("messages") + [{"role": "assistant", "content": [{"type": "text", "text": d["text"]}]},
-                                           {"role": "user", "content": [{"type": "text", "text": "2"}]}]
-        d2 = r.decide(req(messages=msgs, system="Primary working directory: /tmp/proj"), hdr("p2"))
-        self.assertEqual(d2["reason"], "resume queued")
-        self.assertEqual(r.resume_queue[0], {"session": "s1", "cwd": "/tmp/proj", "at": NOW + 3 * 3600 + 120, "queued": NOW})
+    def test_option_1_best_available_now(self):
+        r, d, msgs, d1 = self._ask_then("1")
+        self.assertEqual((d1["action"], d1["upstream"], d1["task"]), ("forward", "gemini", "debug"))
+        self.assertEqual(r.decide(req(messages=tool_step(msgs)), hdr("p2"))["model"], d1["model"])  # kept while Claude is out
+
+    def test_option_2_claude_paid_extra_usage_only_when_configured(self):
+        out = dict(snap(1.0, 0.6, status="rejected"), overage="allowed")
+        _, _, _, d2 = self._ask_then("2", snapshot=out)
+        self.assertNotEqual(d2.get("reason"), "chosen: Claude extra usage (paid, emergency)")  # not offered: "2" means nothing
+        c = cfg()
+        c["funding"]["claude"]["overage"] = "ask"
+        r, _, msgs, d2 = self._ask_then("2", conf=c, snapshot=out)
+        self.assertEqual((d2["upstream"], d2["reason"]), ("anthropic", "chosen: Claude extra usage (paid, emergency)"))
+        self.assertEqual(r.decide(req(messages=tool_step(msgs)), hdr("p2"))["model"], d2["model"])
+
+    def test_option_3_wait_and_resume(self):
+        r, _, _, d3 = self._ask_then("3")
+        self.assertEqual(d3["reason"], "resume queued")
+        self.assertEqual(r.resume_queue[0], {"session": "s1", "cwd": "/tmp/proj", "at": NOW + 3 * 3600 + 120, "queued": NOW,
+                                             "mode": "resume"})
+
+    def test_option_4_stop_and_notify(self):
+        r, _, _, d4 = self._ask_then("4")
+        self.assertEqual(d4["reason"], "stopped: notify only")
+        self.assertEqual(r.resume_queue[0]["mode"], "notify")
 
     def test_nothing_else_allowed_never_pays_by_surprise(self):
         c = cfg()

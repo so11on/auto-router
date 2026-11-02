@@ -408,17 +408,21 @@ class Router:
             self._close_prompt(sess, proj)
             sess["prompt_id"] = prompt_id
             choice = (text or "").strip().lower()
-            if sess.get("pending") and choice in ("1", "!gemini") and sess["pending"].get("suggest"):
-                p = sess.pop("pending")
+            pend = sess.get("pending") or {}
+            if pend and choice in ("1", "!gemini") and pend.get("suggest"):
+                p = sess.pop("pending")  # 1: the best available model now (Gemini), until the plan is back
                 sess.update(a=p["a"], task=p["a"]["task"], hold_until=claude.get("until") or self.clock() + 3600, hold=p["suggest"])
                 return self._finish(sess, p["suggest"], None, "chosen: best available now (Claude plan exhausted)", p["a"], p["req"])
-            if sess.get("pending") and choice == "3" and sess["pending"].get("overage"):
-                p = sess.pop("pending")  # the person chose the paid extra usage (their emergency reserve) for this session
+            if pend and choice == "2" and pend.get("overage"):
+                p = sess.pop("pending")  # 2: Claude's paid extra usage (the person's emergency reserve), until the plan is back
                 sess.update(a=p["a"], task=p["a"]["task"], hold_until=claude.get("until") or self.clock() + 3600, hold=p["overage"])
                 return self._finish(sess, p["overage"], None, "chosen: Claude extra usage (paid, emergency)", p["a"], p["req"])
-            if (sess.get("pending") and choice in ("2", "!esperar")) or (pin_match and pin_match.group(1).lower() in ("esperar", "wait")):
-                sess.pop("pending", None)
-                return self._queue_resume(sess, sid, cwd, claude)
+            if (pend and choice == "3") or (pin_match and pin_match.group(1).lower() in ("esperar", "wait")):
+                sess.pop("pending", None)  # 3: wait and resume automatically when the plan resets
+                return self._queue_resume(sess, sid, cwd, claude, auto=True)
+            if pend and choice == "4":
+                sess.pop("pending", None)  # 4: stop; only a notification when the plan is back, the person continues by hand
+                return self._queue_resume(sess, sid, cwd, claude, auto=False)
             sess.pop("pending", None)
             if pin_match and pin_match.group(1).lower() in TEXT_PINS:
                 name = TEXT_PINS[pin_match.group(1).lower()]
@@ -571,51 +575,49 @@ class Router:
                                for r in sorted(rows or [], key=lambda r: r["cost"])][:6]}
 
     def _ask(self, sess, a, required, usable, claude, claude_model=None) -> dict:
+        """The plan is out and only a Claude model is adequate: four choices, numbered the same way every time (an option that is
+        not possible right now is left out, never renumbered)."""
         until = claude.get("until")
         when = datetime.fromtimestamp(until).strftime("%H:%M") if until else "?"
         day = datetime.fromtimestamp(until).strftime("%d/%m") if until else ""
         today = datetime.fromtimestamp(self.clock()).strftime("%d/%m")
         when_txt = when if day == today else f"{day} {when}"
-        if usable:
-            g = usable[0]
-            st = self.source_state(g["source"])
-            left = st.get("remaining_usd")
-            sess["pending"] = {"a": a, "req": required, "suggest": g["name"], "overage": self._overage_option(claude, claude_model)}
-            text = (f"⏸ A cota do Claude acabou até **{when_txt}**, e o modelo adequado para esta tarefa ({a.get('task')}, "
-                    f"complexidade {a.get('complexity')}) é do Claude.\n\nO melhor disponível agora é o **{g['name']}** "
-                    f"(adequação {g['adequacy']:.1f} para um requisito de {required:.1f}; custo estimado US$ {g['cost']:.2f}"
-                    + (f"; crédito restante ≈ US$ {left:.2f}" if left is not None else "") + ").\n\n"
-                    f"Responda **1** para continuar agora com ele, ou **2** para esperar: eu retomo esta sessão sozinho às {when_txt} "
-                    "e aviso com uma notificação." + self._overage_text(sess))
-        else:
-            sess["pending"] = {"a": a, "req": required, "suggest": None, "overage": self._overage_option(claude, claude_model)}
-            text = (f"⏸ A cota do Claude acabou até **{when_txt}** e não há outro modelo permitido para esta tarefa. "
-                    f"Responda **2** para eu retomar esta sessão sozinho às {when_txt}." + self._overage_text(sess))
-        return {"action": "answer", "reason": "Claude plan exhausted: asked", "text": text, "status": 200, "task": a.get("task"),
-                "complexity": a.get("complexity")}
+        g = usable[0] if usable else None
+        overage = self._overage_option(claude, claude_model)
+        sess["pending"] = {"a": a, "req": required, "suggest": g and g["name"], "overage": overage}
+        lines = [f"⏸ A cota do Claude acabou até **{when_txt}**, e o modelo adequado para esta tarefa ({a.get('task')}, "
+                 f"complexidade {a.get('complexity')}) é do Claude ({claude_model or 'Claude'}). Responda com o número:", ""]
+        if g:
+            left = self.source_state(g["source"]).get("remaining_usd")
+            lines.append(f"- **1** — usar agora o **{g['name']}**, o melhor disponível (adequação {g['adequacy']:.1f} para um requisito "
+                         f"de {required:.1f}; ≈ US$ {g['cost']:.2f}" + (f"; crédito restante ≈ US$ {left:.2f}" if left is not None else "") + ")")
+        if overage:
+            lines.append(f"- **2** — usar os **créditos do Claude** (uso extra pago, sua reserva de emergência) com o {overage}")
+        lines.append(f"- **3** — esperar a cota reiniciar ({when_txt}): retomo esta sessão sozinho e aviso com uma notificação")
+        lines.append(f"- **4** — parar aqui: aviso quando a cota voltar e você manda continuar quando quiser")
+        return {"action": "answer", "reason": "Claude plan exhausted: asked", "text": "\n".join(lines), "status": 200,
+                "task": a.get("task"), "complexity": a.get("complexity")}
 
     def _overage_option(self, claude: dict, claude_model):
-        """Claude's paid extra usage is offered as option 3 only when Anthropic would serve it and the config says `ask`."""
+        """Claude's paid extra usage is offered (option 2) only when Anthropic would serve it and the config says `ask`."""
         mode = ((self.cfg.get("funding") or {}).get("claude") or {}).get("overage", "never")
         return claude_model if claude_model and claude.get("overage") and mode == "ask" else None
 
-    def _overage_text(self, sess) -> str:
-        m = (sess.get("pending") or {}).get("overage")
-        return (f"\n\nOu **3** para usar agora o **uso extra pago do Claude** ({m}, sua reserva de emergência)." if m else "")
-
-    def _queue_resume(self, sess, sid, cwd, claude) -> dict:
+    def _queue_resume(self, sess, sid, cwd, claude, auto: bool = True) -> dict:
         ex = self.cfg.get("on_claude_exhausted") or {}
         until = (claude.get("until") or self.clock() + 3600) + float(ex.get("resume_margin_s", 120))
         when = datetime.fromtimestamp(until).strftime("%d/%m %H:%M")
-        if not ex.get("resume", True) or not cwd or sid == "nosession":
-            return {"action": "answer", "reason": "resume unavailable", "status": 200,
-                    "text": f"Ok, vou esperar. A cota volta por volta de {when}; a retomada automática está desligada "
-                            "(ou não sei a pasta desta sessão), então continue quando quiser."}
+        if auto and (not ex.get("resume", True) or not cwd or sid == "nosession"):
+            auto = False  # cannot resume this session by itself: fall back to a notification
         self.resume_queue = [r for r in self.resume_queue if r["session"] != sid]
-        self.resume_queue.append({"session": sid, "cwd": cwd, "at": until, "queued": self.clock()})
-        return {"action": "answer", "reason": "resume queued", "status": 200, "resume": self.resume_queue[-1],
-                "text": f"⏸ Combinado. Retomo esta sessão sozinho por volta de **{when}**, quando a cota do Claude voltar, "
-                        "e aviso com uma notificação. Ao reabrir a sessão você vê o que foi feito."}
+        self.resume_queue.append({"session": sid, "cwd": cwd, "at": until, "queued": self.clock(), "mode": "resume" if auto else "notify"})
+        if auto:
+            return {"action": "answer", "reason": "resume queued", "status": 200, "resume": self.resume_queue[-1],
+                    "text": f"⏸ Combinado. Retomo esta sessão sozinho por volta de **{when}**, quando a cota do Claude voltar, "
+                            "e aviso com uma notificação. Ao reabrir a sessão você vê o que foi feito."}
+        return {"action": "answer", "reason": "stopped: notify only", "status": 200, "resume": self.resume_queue[-1],
+                "text": f"⏹ Parado. Aviso com uma notificação quando a cota do Claude voltar (por volta de **{when}**); "
+                        "aí é só mandar continuar."}
 
     def _no_model_text(self, rejected: dict, rows: list) -> str:
         why = ", ".join(f"{k}: {v}" for k, v in sorted(rejected.items()))

@@ -61,7 +61,7 @@ funding:
   claude:
     kind: window_quota
     allow_overage: false         # true = paid "extra usage" past the plan limit is used automatically, like any paid source
-    overage: never               # never | ask: offer it as option 3 when the plan is out and only Claude is adequate
+    overage: never               # never | ask: offer it as option 2 when the plan is out and only Claude is adequate
   google:
     kind: money
     currency: USD
@@ -72,6 +72,7 @@ funding:
 
 # What happens when the Claude plan is used up (PLAN 3).
 on_claude_exhausted:            # only when the ADEQUATE models are all Claude (an adequate Gemini is simply used)
-  ask: true                      # ask "1 = best available now / 2 = wait and resume"
-  resume: true                   # "2" queues `claude --resume` for when the plan resets
+  ask: true                      # 1 best available now (Gemini) / 2 Claude paid extra usage (if funding.claude.overage: ask)
+                                 # 3 wait and resume automatically / 4 stop, notify when the plan is back
+  resume: true                   # false: option 3 behaves like 4
   resume_margin_s: 120
