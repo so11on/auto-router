@@ -1,8 +1,11 @@
-// auto-router companion: watches data/context-state.json written by the gateway.
-//  - status bar: profile → model, context %, quota state
-//  - when the gateway sets action "new_chat" (context nearly full) it opens a new chat that continues from the
-//    session memory file (.auto-router/memory/<session>.md), sending the prompt automatically if allowed.
+// auto-router companion (1.0).
+//  - status bar: the model and effort Claude Code is really using, "sonnet (medium)", and the plan use. It asks the local gateway
+//    (GET /state); without a gateway it shows the model and effort from ~/.claude/settings.json. No tokens are spent.
+//  - "Add to Claude Code" in the Explorer menu.
+//  - legacy (setting autoRouter.legacyStack, off by default): the Copilot Chat stack's context status and automatic new chat
+//    (data/context-state.json written by the LiteLLM hook).
 const vscode = require("vscode");
+const http = require("http");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -76,10 +79,65 @@ function onChange() {
   render();
   const key = `${s.session}`;
   if (s.action === "new_chat" && s.updated >= startedAt - 5 && !handled.has(key)
+      && vscode.workspace.getConfiguration("autoRouter").get("legacyStack")
       && vscode.workspace.getConfiguration("autoRouter").get("autoNewChat")) {
     handled.add(key);
     openNewChat(s, "context nearly full");
   }
+}
+
+function gatewayUrl() {
+  return (vscode.workspace.getConfiguration("autoRouter").get("gatewayUrl") || "http://127.0.0.1:4001").replace(/\/$/, "");
+}
+
+function fetchState() {
+  return new Promise((resolve) => {
+    const req = http.get(gatewayUrl() + "/state", { timeout: 800 }, (res) => {
+      let body = "";
+      res.on("data", (d) => (body += d));
+      res.on("end", () => { try { resolve(JSON.parse(body)); } catch { resolve(null); } });
+    });
+    req.on("error", () => resolve(null));
+    req.on("timeout", () => { req.destroy(); resolve(null); });
+  });
+}
+
+function family(s) {
+  s = String(s || "");
+  for (const f of ["haiku", "sonnet", "opus"]) if (s.toLowerCase().includes(f)) return f;
+  return s || "?";
+}
+
+function claudeSettings() {
+  try { return JSON.parse(fs.readFileSync(path.join(os.homedir(), ".claude", "settings.json"), "utf8")); } catch { return {}; }
+}
+
+/** What the status bar says: "sonnet (medium) · 5h 42%". */
+async function renderGateway() {
+  const settings = claudeSettings();
+  const routed = Boolean(settings.env && /127\.0\.0\.1:4001|localhost:4001/.test(settings.env.ANTHROPIC_BASE_URL || ""));
+  const st = await fetchState();
+  if (routed && !st) {
+    item.text = "$(warning) auto-router: gateway not answering";
+    item.tooltip = "Claude Code is pointed at the gateway but it does not answer. Run: node ar.mjs status  (or node ar.mjs off to go direct)";
+    item.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
+    return;
+  }
+  item.backgroundColor = undefined;
+  let model = family(settings.model), effort = settings.effortLevel, extra = "", plan = "";
+  if (st && st.sessions) {
+    const latest = Object.values(st.sessions).sort((a, b) => (b.ts || 0) - (a.ts || 0))[0];
+    if (latest && latest.sent && latest.sent.model) {
+      model = latest.sent.model; effort = latest.sent.effort || effort;
+      if (st.mode === "shadow" && latest.model && family(latest.model) !== model) extra = ` · auto: ${family(latest.model)}${latest.effort ? ` (${latest.effort})` : ""}`;
+    }
+  }
+  const w = st && st.claude && st.claude.windows;
+  if (w && w["5h"] && w["5h"].utilization != null) plan = ` · 5h ${Math.round(w["5h"].utilization * 100)}%`;
+  if (st && st.claude && st.claude.exhausted) { plan += " · plan out"; item.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground"); }
+  item.text = `$(circuit-board) ${model}${effort ? ` (${effort})` : ""}${extra}${plan}`;
+  item.tooltip = st ? `auto-router ${st.version || ""} · mode ${st.mode || "?"} · most recent session. Click for details.`
+    : "No gateway: showing the model and effort from ~/.claude/settings.json";
 }
 
 function activate(context) {
@@ -87,26 +145,23 @@ function activate(context) {
   item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   item.command = "autoRouter.showStatus";
   item.show();
-  state = readState();
-  render();
   publishWorkspace();
+  const legacy = vscode.workspace.getConfiguration("autoRouter").get("legacyStack");
+  if (legacy) {
+    state = readState();
+    render();
+    fs.watchFile(statePath(), { interval: 1000 }, onChange);
+  } else {
+    renderGateway();
+  }
+  const timer = legacy ? null : setInterval(renderGateway, 3000);
   context.subscriptions.push(vscode.window.onDidChangeWindowState((w) => { if (w.focused) publishWorkspace(); }));
-  fs.watchFile(statePath(), { interval: 1000 }, onChange);
-  context.subscriptions.push(item, log, { dispose: () => fs.unwatchFile(statePath()) },
-    vscode.commands.registerCommand("autoRouter.showStatus", () => {
-      log.appendLine(JSON.stringify(readState(), null, 2)); log.show(true);
-    }),
-    vscode.commands.registerCommand("autoRouter.openMemory", async () => {
-      const s = readState();
-      if (!s || !s.workspace || !s.memory_file) return vscode.window.showInformationMessage("auto-router: no session memory yet.");
-      vscode.window.showTextDocument(vscode.Uri.file(path.join(s.workspace, s.memory_file)));
-    }),
-    vscode.commands.registerCommand("autoRouter.continueInNewChat", () => {
-      const s = readState();
-      if (s) openNewChat(s, "manual");
+  context.subscriptions.push(item, log, { dispose: () => { if (timer) clearInterval(timer); fs.unwatchFile(statePath()); } },
+    vscode.commands.registerCommand("autoRouter.showStatus", async () => {
+      log.appendLine(JSON.stringify(legacy ? readState() : await fetchState(), null, 2)); log.show(true);
     }),
     vscode.commands.registerCommand("autoRouter.addToClaudeCode", addToClaudeCode));
-  log.appendLine(`auto-router companion active; watching ${statePath()}`);
+  log.appendLine(`auto-router companion active (${legacy ? "legacy stack, watching " + statePath() : "gateway " + gatewayUrl()})`);
 }
 
 // The Claude Code extension has no Explorer context-menu entry; its own "Insert @-Mention Reference" command only works on the

@@ -12,5 +12,5 @@ __pycache__/
 *.pyc
 .DS_Store
 
-# v0.6: the person's own gateway setup (credits, budgets, choices) never goes to the repository
+# 1.0: the person's own gateway setup (credits, budgets, choices) never goes to the repository
 config/local/

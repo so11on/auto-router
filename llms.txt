@@ -1,10 +1,14 @@
 # auto-router
 
+> 1.0: an umbrella (`node ar.mjs on|off|feature`) with two optional doors: `auto` inside Claude Code (local Python gateway, no Docker: picks Haiku/Sonnet/Opus and the effort, shadow/route modes, Gemini as a tool, token-saving hooks) and the older Copilot Chat stack below. Read docs/INCIDENTS.md first.
+>
 > Local LiteLLM gateway exposing auto-free / auto-balanced / auto-smart. A pre-call hook masks secrets and personal data (DLP),
 > classifies each request (task, complexity) and a routing engine picks the model from per-profile tables (Gemini, the safety-filtered free
 > OmniRoute pool, Claude / ChatGPT / Copilot via CLI bridge or API), setting reasoning effort and falling back on failure.
 
 ## Start here
+- [docs/INCIDENTS.md](docs/INCIDENTS.md): what went wrong on a real install, and the rules that follow (read first)
+- [docs/GATEWAY.md](docs/GATEWAY.md): the Claude Code gateway and the umbrella; [docs/TOKEN-SAVING.md](docs/TOKEN-SAVING.md)
 - [AGENTS.md](AGENTS.md): map, commands, invariants, gotchas for AI assistants
 - [INSTALL_WITH_AI.md](INSTALL_WITH_AI.md): runbook for an AI assistant to install everything on a new computer (any OS)
 - [UPDATE_WITH_AI.md](UPDATE_WITH_AI.md): runbook for an AI assistant to update an existing install, keeping keys and choices

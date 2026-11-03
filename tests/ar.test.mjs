@@ -206,11 +206,11 @@ test("fresh install: init creates .env with generated secrets, profile and local
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-test("no personal data or secrets are shipped", () => {
+test("no personal data or secrets are shipped", () => { // git-ignored local state (bytecode caches, config/local) is not shipped
   const bad = [/so11on/i, /sollon/i, /limarj/i, /\/Users\/[a-z0-9]+/i, /C:\\Users\\[a-z0-9]+/i, /sk-[A-Za-z0-9]{24,}/, /AIza[0-9A-Za-z_-]{30}/, /gsk_[A-Za-z0-9]{20,}/, /nvapi-[A-Za-z0-9_-]{20,}/, /sk-ant-[A-Za-z0-9_-]{20,}/, /sk-or-[A-Za-z0-9_-]{20,}/, /ghp_[A-Za-z0-9]{20,}/];
   const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap((x) => {
     const p = path.join(d, x.name);
-    if (/^(\.git|data|node_modules|\.auto-router)$/.test(x.name) || /^\.env(\.bak)?$/.test(x.name) || x.name.endsWith(".vsix") || p.endsWith(path.join("tests", "ar.test.mjs"))) return [];
+    if (/^(\.git|data|node_modules|\.auto-router|__pycache__)$/.test(x.name) || p.endsWith(path.join("config", "local")) || /^\.env(\.bak)?$/.test(x.name) || x.name.endsWith(".vsix") || p.endsWith(path.join("tests", "ar.test.mjs"))) return [];
     return x.isDirectory() ? walk(p) : [p];
   });
   const hits = [];

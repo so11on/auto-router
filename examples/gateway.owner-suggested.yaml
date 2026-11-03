@@ -1,0 +1,26 @@
+# One person's setup, anonymised. Route mode from day one, the texts in the person's own language, Gemini for classification and tools.
+mode: route
+models:
+  gemini-flash-lite: {enabled: true}
+  gemini-flash: {enabled: true}
+  gemini-pro: {enabled: true}
+  gemini-argon: {enabled: true}
+classifier:
+  model: gemini-flash-lite
+funding:
+  claude:
+    overage: ask        # paid extra usage only as an explicit option 2 when the plan runs out
+  google:
+    kind: money
+    currency: USD
+    lots:
+      - {remaining: 10.0, ends: "2027-01-31"}
+      - {remaining: 10.0, ends: "2027-07-31"}
+    prepaid: {amount: 8}
+    allow_payg: false
+patterns:                # words of your language for "continue" and "that did not work"
+  continue_extra: ["continua", "segue", "sim", "pode", "beleza", "travou", "parou"]
+  complaint_extra: ["não funcionou", "errado", "de novo", "ainda não"]
+messages:
+  resume_notify: "⏹ Parado. Aviso quando a cota do Claude voltar (por volta de **{when}**); aí é só mandar continuar."
+  notify_plan_back: "A cota do Claude voltou. Pode mandar continuar em {folder}."

@@ -1,7 +1,11 @@
 <!-- Plano aprovado pelo dono em 2026-11-02 (pt-BR, escrito junto com ele). Medições do spike: docs/DECISIONS.md, 2026-11-02. -->
 > **Revisto em 2026-11-02:** a regra de escolha passou a ser "adequação primeiro; entre os adequados, o mais barato; equilíbrio de cotas só desempata; sem a opção de folga". A regra em vigor está em `docs/GATEWAY.md`; os itens 3b ("aproveitar folga") e o preço-sombra como critério principal abaixo ficam substituídos.
+> **Estado em 2026-11-03 (1.0.0).** Feito: Fases 1 (spike), 2A, 2B (troca no meio da tarefa), `auto` por adequação, Fase 3 (cota esgotada: perguntar, esperar e retomar),
+> Fase 6 em parte (status line e barra do VS Code com `modelo (esforço)`), Fase 7 em parte (guarda-chuva `on/off/feature`, exemplos genéricos).
+> Gemini passou de modelo de conversa a ferramenta (`ar.mjs gemini`, lote incluído). Não feito: 2C (cartão do projeto gerado), 2D (lotes automáticos pelo roteador),
+> `ar.mjs wait`, PreCompact, `core/` e adaptador `openai-chat` (para tirar o Docker de vez: Copilot e Codex no mesmo processo). Veja `docs/INCIDENTS.md`.
 
-# Plano: auto-router v0.6, roteamento automático dentro do Claude Code, leve e 100% local
+# Plano: auto-router 1.0, roteamento automático dentro do Claude Code, leve e 100% local
 
 ## Contexto
 **O que você quer:**
@@ -312,8 +316,8 @@ Acrescentada em 2026-11-02 a pedido do dono. Pesquisa e fontes em `docs/DECISION
 - Na pergunta de cota esgotada, a opção **5** (lote) segue a mesma regra.
 
 **A verificar antes de implementar:**
-- **Resolvido em 2026-11-02:** o dono recarrega os R$ 20 em claude.ai (créditos de uso da assinatura), logo **não há saldo de API do Console**: o lote da Anthropic fica desligado (`batch.anthropic.enabled: false`) e só o lote do Gemini é implementado primeiro. O código da Anthropic só entra se o dono criar saldo no Console.
-- **Carteira de lotes (contexto):** a API de lotes é produto do Console (chave de API, saldo do Console). Os "créditos de uso" da assinatura (antigo uso extra, cobrados a preço de API) vêm de outra carteira (claude.ai, Configurações, Uso); a documentação trata Claude Code e Console como sistemas separados. Confirmar em qual tela o dono recarrega os R$ 20.
+- **Resolvido em 2026-11-02:** o dono recarrega créditos de uso em claude.ai (da assinatura), logo **não há saldo de API do Console**: o lote da Anthropic fica desligado (`batch.anthropic.enabled: false`) e só o lote do Gemini é implementado primeiro. O código da Anthropic só entra se o dono criar saldo no Console.
+- **Carteira de lotes (contexto):** a API de lotes é produto do Console (chave de API, saldo do Console). Os "créditos de uso" da assinatura (antigo uso extra, cobrados a preço de API) vêm de outra carteira (claude.ai, Configurações, Uso); a documentação trata Claude Code e Console como sistemas separados. Confirmado: a recarga é feita em claude.ai.
 - **Gemini 4 Argon em lote:** confirmar com uma chamada real de poucos centavos que o modelo aceita o modo de lote.
 - **Espera automática nativa do Claude Code:** a documentação (code.claude.com/docs/en/costs) diz que, desde a v2.1.234, o próprio Claude Code pode esperar a cota reiniciar e continuar a tarefa (`/rate-limit-options`, `autoContinueAtUsageLimit`). Como o gateway responde no lugar do 429, essa espera nativa não dispararia. Verificar se vale reaproveitá-la na opção 3 da Fase 3 em vez do `claude -p --resume`.
 - **Cobrança do `claude -p`:** fontes terceiras afirmam que o uso programático (`-p`, Agent SDK) passou a sair de um pool de créditos separado desde 15/06/2026. Não confirmado na documentação oficial; afeta a retomada automática. Medir numa chamada real.

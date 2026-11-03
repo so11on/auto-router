@@ -57,6 +57,8 @@ def _text_of(content) -> str:
             parts.append(b.get("text", ""))
         elif isinstance(b, dict) and b.get("type") == "image":
             parts.append("[image]")
+        elif isinstance(b, dict) and b.get("type") == "tool_reference":  # ToolSearch result: the tool's name is the content
+            parts.append("[tool available: %s]" % b.get("tool_name", ""))
     return "\n".join(parts)
 
 
@@ -79,9 +81,36 @@ def _user_parts(blocks):
     return parts
 
 
+def repair_args(raw) -> dict:
+    """Tool-call arguments -> a dict. Two objects glued together (`{..}{..}`, seen when parallel calls were merged) are merged;
+    anything unreadable becomes {} so Claude Code gets a valid tool_use instead of an InputValidationError."""
+    if isinstance(raw, dict):
+        return raw
+    raw = (raw or "").strip()
+    if not raw:
+        return {}
+    try:
+        v = json.loads(raw)
+        return v if isinstance(v, dict) else {}
+    except ValueError:
+        pass
+    out, dec, i = {}, json.JSONDecoder(), 0
+    while i < len(raw):
+        try:
+            v, j = dec.raw_decode(raw, i)
+        except ValueError:
+            break
+        if isinstance(v, dict):
+            out.update(v)
+        i = j
+        while i < len(raw) and raw[i] in " \n\t\r,":
+            i += 1
+    return out
+
+
 def to_openai(req: dict, model: str, gemini: bool = True) -> dict:
     """Anthropic Messages request -> OpenAI Chat Completions request for `model`."""
-    msgs = []
+    msgs, names = [], {}
     system = req.get("system")
     if system:
         msgs.append({"role": "system", "content": _text_of(system)})
@@ -95,10 +124,11 @@ def to_openai(req: dict, model: str, gemini: bool = True) -> dict:
             text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
             calls = []
             for b in blocks:
-                if b.get("type") != "tool_use":
+                if b.get("type") != "tool_use" or not b.get("name"):  # a call with no name would make Gemini reject its result
                     continue
+                names[b.get("id")] = b["name"]
                 call = {"id": b.get("id"), "type": "function",
-                        "function": {"name": b.get("name"), "arguments": json.dumps(b.get("input") or {}, ensure_ascii=False)}}
+                        "function": {"name": b["name"], "arguments": json.dumps(b.get("input") or {}, ensure_ascii=False)}}
                 if gemini:
                     call["extra_content"] = {"google": {"thought_signature": _signatures.get(b.get("id"), SKIP_SIGNATURE)}}
                 calls.append(call)
@@ -109,13 +139,20 @@ def to_openai(req: dict, model: str, gemini: bool = True) -> dict:
                 msgs.append(out)
             continue
         # user turn: tool results first (they must follow the assistant's tool calls), then the rest as one user message
+        orphans = []
         for b in blocks:
             if b.get("type") == "tool_result":
                 body = _text_of(b.get("content"))
                 if b.get("is_error"):
                     body = "ERROR: " + body
-                msgs.append({"role": "tool", "tool_call_id": b.get("tool_use_id"), "content": body or "(empty)"})
+                name = names.get(b.get("tool_use_id"))
+                if name:
+                    msgs.append({"role": "tool", "tool_call_id": b.get("tool_use_id"), "name": name, "content": body or "(empty)"})
+                else:  # its call is not in this history (compacted away, or a tool we do not forward): keep the content as text
+                    orphans.append("[tool result]\n" + (body or "(empty)"))
         parts = _user_parts([b for b in blocks if b.get("type") != "tool_result"])
+        if orphans:
+            parts.insert(0, {"type": "text", "text": "\n\n".join(orphans)})
         if parts:
             only_text = all(p["type"] == "text" for p in parts)
             msgs.append({"role": "user", "content": "\n".join(p["text"] for p in parts) if only_text else parts})
@@ -162,15 +199,22 @@ def _sse(event: str, data: dict) -> bytes:
 
 
 class StreamTranslator:
-    """Feed OpenAI SSE lines (bytes, without the trailing newline); get Anthropic SSE event bytes back."""
+    """Feed OpenAI SSE lines (bytes, without the trailing newline); get Anthropic SSE event bytes back.
+
+    Text streams live. Tool calls are collected whole and emitted at the end, one block each with valid JSON arguments: providers
+    differ in how they number parallel calls (Gemini may omit or repeat `index`), and gluing two calls into one made Claude Code
+    receive `{..}{..}` (incident 2026-11-02)."""
 
     def __init__(self, model_label: str):
         self.model = model_label
         self.started = False
-        self.block = None          # ("text", index) | ("tool", index, openai_tool_index)
+        self.block = None          # ("text", index)
         self.index = -1
-        self.tools = {}            # openai tool index -> anthropic block index
+        self.calls = []            # [{"id","name","args","index"}]
+        self.by_id = {}
+        self.by_index = {}
         self.stop = None
+        self.error = None
         self.usage = {"input_tokens": 0, "output_tokens": 0}
 
     def _start(self):
@@ -186,6 +230,24 @@ class StreamTranslator:
         self.block = None
         return out
 
+    def _slot(self, tc):
+        fn = tc.get("function") or {}
+        cid, name, ti = tc.get("id"), fn.get("name"), tc.get("index")
+        if cid and cid in self.by_id:
+            return self.by_id[cid]
+        if not cid and not name:  # a continuation chunk: the same index, else the last call
+            return self.by_index.get(ti) if ti in self.by_index else (self.calls[-1] if self.calls else None)
+        if not cid and ti in self.by_index:
+            cur = self.by_index[ti]
+            if cur["name"] == name and cur["args"].strip() and not _valid_json(cur["args"]):
+                return cur  # the provider repeats the name while the arguments are still arriving
+        call = {"id": cid or ("toolu_" + uuid.uuid4().hex[:24]), "name": name or "", "args": "", "index": ti}
+        self.calls.append(call)
+        self.by_id[call["id"]] = call
+        if ti is not None:
+            self.by_index[ti] = call
+        return call
+
     def feed(self, line: bytes) -> bytes:
         line = line.strip()
         if not line.startswith(b"data:"):
@@ -196,6 +258,12 @@ class StreamTranslator:
         try:
             chunk = json.loads(payload)
         except ValueError:
+            return b""
+        if isinstance(chunk, list):  # Gemini wraps an error in a list
+            chunk = chunk[0] if chunk and isinstance(chunk[0], dict) else {}
+        if chunk.get("error"):
+            e = chunk["error"]
+            self.error = e.get("message") if isinstance(e, dict) else str(e)
             return b""
         out = b"" if self.started else self._start()
         u = chunk.get("usage")
@@ -213,20 +281,15 @@ class StreamTranslator:
                 out += _sse("content_block_delta", {"type": "content_block_delta", "index": self.index,
                                                     "delta": {"type": "text_delta", "text": d["content"]}})
             for tc in d.get("tool_calls") or []:
-                ti = tc.get("index", 0)
+                call = self._slot(tc)
+                if call is None:
+                    continue
                 fn = tc.get("function") or {}
-                if ti not in self.tools:
-                    out += self._close_block()
-                    self.index += 1
-                    self.tools[ti] = self.index
-                    call_id = tc.get("id") or ("toolu_" + uuid.uuid4().hex[:24])
-                    _remember(call_id, tc)
-                    self.block = ("tool", self.index, ti)
-                    out += _sse("content_block_start", {"type": "content_block_start", "index": self.index,
-                                                        "content_block": {"type": "tool_use", "id": call_id, "name": fn.get("name"), "input": {}}})
+                if fn.get("name") and not call["name"]:
+                    call["name"] = fn["name"]
                 if fn.get("arguments"):
-                    out += _sse("content_block_delta", {"type": "content_block_delta", "index": self.tools[ti],
-                                                        "delta": {"type": "input_json_delta", "partial_json": fn["arguments"]}})
+                    call["args"] += fn["arguments"] if isinstance(fn["arguments"], str) else json.dumps(fn["arguments"])
+                _remember(call["id"], tc)
             if ch.get("finish_reason"):
                 self.stop = _STOP.get(ch["finish_reason"], "end_turn")
         return out
@@ -234,13 +297,32 @@ class StreamTranslator:
     def finish(self) -> bytes:
         out = b"" if self.started else self._start()
         out += self._close_block()
+        if self.error:
+            return out + _sse("error", {"type": "error", "error": {"type": "api_error", "message": "upstream: " + self.error[:300]}})
+        calls = [c for c in self.calls if c["name"]]
+        for c in calls:
+            self.index += 1
+            out += _sse("content_block_start", {"type": "content_block_start", "index": self.index,
+                                                "content_block": {"type": "tool_use", "id": c["id"], "name": c["name"], "input": {}}})
+            out += _sse("content_block_delta", {"type": "content_block_delta", "index": self.index,
+                                                "delta": {"type": "input_json_delta",
+                                                          "partial_json": json.dumps(repair_args(c["args"]), ensure_ascii=False)}})
+            out += _sse("content_block_stop", {"type": "content_block_stop", "index": self.index})
         stop = self.stop or "end_turn"
-        if self.tools and stop == "end_turn":
+        if calls and stop == "end_turn":
             stop = "tool_use"
         out += _sse("message_delta", {"type": "message_delta", "delta": {"stop_reason": stop, "stop_sequence": None},
                                       "usage": {"output_tokens": self.usage["output_tokens"], "input_tokens": self.usage["input_tokens"]}})
         out += _sse("message_stop", {"type": "message_stop"})
         return out
+
+
+def _valid_json(text: str) -> bool:
+    try:
+        json.loads(text)
+        return True
+    except ValueError:
+        return False
 
 
 def to_anthropic(resp: dict, model_label: str) -> dict:
@@ -254,11 +336,9 @@ def to_anthropic(resp: dict, model_label: str) -> dict:
         fn = tc.get("function") or {}
         call_id = tc.get("id") or ("toolu_" + uuid.uuid4().hex[:24])
         _remember(call_id, tc)
-        try:
-            args = json.loads(fn.get("arguments") or "{}")
-        except ValueError:
-            args = {}
-        content.append({"type": "tool_use", "id": call_id, "name": fn.get("name"), "input": args})
+        if not fn.get("name"):
+            continue
+        content.append({"type": "tool_use", "id": call_id, "name": fn["name"], "input": repair_args(fn.get("arguments"))})
     stop = _STOP.get(ch.get("finish_reason"), "end_turn")
     if any(b["type"] == "tool_use" for b in content):
         stop = "tool_use"

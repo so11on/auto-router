@@ -23,14 +23,17 @@ classifies each new user turn (task + complexity 1-5), and `engine.route()` pick
 | Free-tier numbers | `docs/FREE-TIER-LIMITS.md` |
 | Run/debug | `docs/OPERATIONS.md`, `scripts/` |
 | Why a choice was made | `docs/DECISIONS.md` |
-| Claude Code gateway (`auto`), v0.6 | `docs/GATEWAY.md`, `gateway/` (+ `tests/test_gateway_router.py`), plan in `docs/PLAN-v0.6.md` |
+| Claude Code gateway (`auto`), umbrella, 1.0 | `docs/GATEWAY.md`, `gateway/` (+ `tests/test_gateway_router.py`, `tests/test_translate_openai.py`), `scripts/umbrella.mjs` (+ `tests/umbrella.test.mjs`), roadmap in `docs/ROADMAP.md` |
+| **What went wrong before (read before changing the gateway)** | `docs/INCIDENTS.md` |
+| Token saving, Gemini as a tool, caveman verdict | `docs/TOKEN-SAVING.md` |
 | Install on another computer (AI-readable) | `INSTALL_WITH_AI.md`, `docs/INSTALL-LESSONS.md` |
 
 ## Commands
 ```sh
 python3 -m unittest discover -s tests -v      # unit tests (pip install pyyaml)
 node --test tests/*.test.mjs                    # installer, bridge, hooks, OmniRoute contract, tune
-node ar.mjs up|down|status
+node ar.mjs on|off|feature list|status|mode|report     # the 1.0 umbrella: everything, or one part (see docs/GATEWAY.md)
+node ar.mjs up|down                             # the older Docker stack only
 node ar.mjs smoke                               # end-to-end, needs the stack up
 node ar.mjs logs [-f]                   # operation log (route/call/failover events)
 node ar.mjs usage                       # token/usage shares on demand
@@ -52,10 +55,12 @@ docker compose up -d --force-recreate litellm  # after editing config.yaml / rou
 9. The bridge strips `ANTHROPIC_*` for `claude`, `OPENAI_*`/`CODEX_API_KEY` for `codex` and `GH_TOKEN`/`GITHUB_TOKEN`/`COPILOT_GITHUB_TOKEN` for `copilot` so subscriptions, not API keys, are used. Never hard-code OpenAI model ids: they come from `ar.mjs openai` after a verifying call.
 9b. VS Code auth is `requestHeaders` (not `apiKey`); the model footer is part of the answer text and is stripped from history — keep both behaviours.
 10. Pins (`pins:` in routing.yaml) never let `auto-free` reach a paid model and never override safety / sensitivity / availability; keep those checks in `async_pre_call_hook`.
+11. Streaming failover: `router_hook.async_post_call_streaming_iterator_hook` continues a broken answer on the next fallback; keep it Chat-Completions-only unless you test the other formats.
 12. `docker-compose.yml`: images pinned by digest (never `:latest` / `:main-stable`), the gateway gets an explicit `environment:` list (no `env_file`); `ar.mjs update` never changes an `image:` line. OmniRoute is used only through the surface in `docs/OMNIROUTE-CONTRACT.md`.
 13. Prices, privacy classes, fit and limits are data in `models.yaml`; never hard-code a model's facts in Python.
 14. Gateway (`gateway/`): adequacy decides, money/quota only breaks ties between equivalent adequate models; never rewrite `messages`/`system`/`tools` of a Claude request (cache + thinking); never use Claude paid extra usage unless `allow_overage`; stdlib + PyYAML only; loopback only.
-11. Streaming failover: `router_hook.async_post_call_streaming_iterator_hook` continues a broken answer on the next fallback; keep it Chat-Completions-only unless you test the other formats.
+15. **Umbrella (1.0):** every feature is off in `gateway/features.defaults.json`; the person's choices live in `config/local/` (git-ignored); nothing personal (paths, amounts, names, language-specific wording) in tracked files; user-facing texts come from `messages:` in the config. `ar.mjs off` must always restore Claude Code to Anthropic directly and remove only what the umbrella installed (marked paths/markers), never the user's own hooks, permissions, status line or CLAUDE.md text.
+16. **The conversation of Claude Code never goes to another vendor by default.** `auto` chooses among Haiku/Sonnet/Opus and the effort; a model takes the main loop only if its `roles` include `main`. Gemini is a tool (`node ar.mjs gemini`) and the optional classifier. The main loop has a floor (`quality.main_floor`); continuations inherit the work in progress; the reply label is the real model. Regression tests for each cause in `docs/INCIDENTS.md` must stay green.
 
 ## Conventions
 - Python 3.9-compatible code in `litellm/` and `scripts/`; Node without dependencies in `claude-bridge/`.

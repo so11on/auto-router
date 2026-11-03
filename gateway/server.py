@@ -44,9 +44,32 @@ SERVED = re.compile(rb'"model"\s*:\s*"([^"]{1,80})"')
 USAGE = {k: re.compile(rb'"' + k.encode() + rb'"\s*:\s*(\d+)') for k in
          ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")}
 MAX_LOG_BYTES = 10_000_000
-RESUME_PROMPT = ("A cota do Claude voltou. Continue a tarefa que foi interrompida quando ela acabou, a partir de onde parou; "
-                 "releia os arquivos antes de editar.")
+VERSION = "1.0.0"
 _lock = threading.Lock()
+
+
+def short(name) -> str:
+    """claude-sonnet-5-5 / claude-sonnet-cli -> sonnet: what the person reads next to the effort."""
+    n = str(name or "")
+    for fam in ("haiku", "sonnet", "opus"):
+        if fam in n:
+            return fam
+    return n
+
+
+def shape(req: dict) -> dict:
+    """Sizes and block types of a request, never its text: enough to see a client that lost its history or toolbox."""
+    sysp = req.get("system")
+    sys_chars = len(sysp) if isinstance(sysp, str) else sum(len(b.get("text", "")) for b in sysp or [] if isinstance(b, dict))
+    msgs = req.get("messages") or []
+    kinds = {}
+    for m in msgs:
+        content = m.get("content")
+        for b in content if isinstance(content, list) else [{"type": "text"}]:
+            if isinstance(b, dict):
+                kinds[b.get("type")] = kinds.get(b.get("type"), 0) + 1
+    return {"sys_chars": sys_chars, "tools": len(req.get("tools") or []), "msgs": len(msgs),
+            "first": msgs[0].get("role") if msgs else None, "blocks": kinds, "est_tokens": rt.est_tokens(req)}
 
 
 def read_dotenv(names, path=None) -> dict:
@@ -80,7 +103,9 @@ def log(rec: dict):
 
 
 def notify(title: str, text: str):
-    """Local desktop notification; silently nothing where none is available."""
+    """Local desktop notification; silently nothing where none is available or the feature is off."""
+    if GW is not None and not GW.router.feature("notifications"):
+        return
     try:
         if sys.platform == "darwin":
             script = 'display notification %s with title %s' % (json.dumps(text), json.dumps(title))
@@ -100,7 +125,7 @@ class Classifier:
         cfg = self.gw.router.cfg.get("classifier") or {}
         name = cfg.get("model")
         m = (self.gw.router.cfg.get("models") or {}).get(name or "") or {}
-        allowed = name and m.get("upstream") == "gemini" and self.gw.router._available(name, m) and \
+        allowed = name and m.get("upstream") == "gemini" and "classifier" in (m.get("roles") or []) and self.gw.router._available(name, m) and \
             rt.safety.allowed_by_safety(name, self.gw.router.settings) and \
             (not sensitive or rt.safety.allowed_for_sensitive(name, self.gw.router.settings))
         if allowed and not self.gw.router.source_state(m.get("source", "google")).get("exhausted"):
@@ -165,14 +190,17 @@ class Gateway:
             conn.close()
 
     # ---------- state for the status line / companion extension
-    def publish(self, sid=None, decision=None):
+    def publish(self, sid=None, decision=None, sent=None):
+        """`sent` = the model and effort that actually went upstream (shadow: what Claude Code asked for); `model`/`effort` stay the
+        decision of `auto`, so the status shows both when they differ."""
         if sid and decision:
             self.last_decisions[sid] = {k: decision.get(k) for k in ("model", "effort", "task", "complexity", "reason", "source",
                                                                      "lambda", "switched_from", "sensitive")}
+            self.last_decisions[sid]["sent"] = sent
             self.last_decisions[sid]["ts"] = time.time()
         claude = self.router.source_state("claude")
         google = self.router.source_state("google") if (self.router.cfg.get("funding") or {}).get("google") else {}
-        state = _num({"ts": time.time(), "claude": {"lambda": claude.get("lambda"), "exhausted": claude.get("exhausted"),
+        state = _num({"ts": time.time(), "version": VERSION, "mode": self.router.mode, "claude": {"lambda": claude.get("lambda"), "exhausted": claude.get("exhausted"),
                                                     "until": claude.get("until"), "windows": claude.get("windows")},
                       "google": google, "sessions": dict(list(self.last_decisions.items())[-50:]),
                       "resume_queue": self.router.resume_queue, "claude_snapshot": self.router.claude_snapshot})
@@ -207,21 +235,23 @@ class Gateway:
                 threading.Thread(target=self._resume, args=(r, port), daemon=True).start()
 
     def _resume(self, r: dict, port: int):
+        m, title = self.router.msg, self.router.msg("notify_title")
+        folder = os.path.basename(r.get("cwd") or "")
         if r.get("mode") == "notify":  # option 4: the person continues by hand
-            notify("auto-router", "A cota do Claude voltou. Pode mandar continuar em " + os.path.basename(r.get("cwd") or "") + ".")
+            notify(title, m("notify_plan_back", folder=folder))
             log({"event": "plan_back_notified", "session": r["session"][:8]})
             return
         claude = shutil.which("claude")
         if not claude or not os.path.isdir(r["cwd"]):
             log({"event": "resume_failed", "session": r["session"][:8], "why": "no claude CLI or folder"})
-            notify("auto-router", "Não consegui retomar a sessão: claude ou a pasta não foram encontrados.")
+            notify(title, m("notify_no_claude"))
             return
         env = {k: v for k, v in os.environ.items() if not k.startswith(("ANTHROPIC_", "CLAUDE_CODE_")) and k != "GEMINI_API_KEY"}
         env.update(ANTHROPIC_BASE_URL=f"http://127.0.0.1:{port}", CLAUDE_CODE_GATEWAY_HINT_HEADERS="1")
-        notify("auto-router", "A cota do Claude voltou: retomando a sessão em " + os.path.basename(r["cwd"]))
+        notify(title, m("notify_resuming", folder=folder))
         log({"event": "resume_start", "session": r["session"][:8]})
         try:
-            p = subprocess.run([claude, "-p", RESUME_PROMPT, "--resume", r["session"], "--permission-mode", "acceptEdits",
+            p = subprocess.run([claude, "-p", m("resume_prompt"), "--resume", r["session"], "--permission-mode", "acceptEdits",
                                 "--output-format", "json"], cwd=r["cwd"], env=env, capture_output=True, text=True, timeout=3 * 3600,
                                stdin=subprocess.DEVNULL)
             ok = p.returncode == 0
@@ -235,13 +265,13 @@ class Gateway:
         tries = r.get("tries", 0) + 1
         log({"event": "resume_end", "session": r["session"][:8], "ok": ok, "tries": tries})
         if ok:
-            notify("auto-router", "Tarefa retomada e concluída em " + os.path.basename(r["cwd"]) + ". Abra a sessão para ver.")
+            notify(title, m("notify_resumed", folder=folder))
         elif tries < 4 and self.router.source_state("claude").get("exhausted"):
             r.update(at=time.time() + 900, tries=tries)
             self.router.resume_queue.append(r)
             self.save_queue()
         else:
-            notify("auto-router", "A retomada automática precisou de você em " + os.path.basename(r["cwd"]) + ".")
+            notify(title, m("notify_needs_you", folder=folder))
 
 
 def _num(v):
@@ -372,23 +402,38 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001 - never block Claude Code because the router failed: send as asked
             log({"event": "router_error", "error": f"{type(e).__name__}: {e}"[:300]})
             return self._passthrough(raw)
+        shadow = GW.router.mode == "shadow"
+        asked_effort = (req.get("output_config") or {}).get("effort") if isinstance(req.get("output_config"), dict) else None
         rec = {"event": "route", "session": sid[:8], "class": h.get("x-claude-code-request-class"), "asked": req.get("model"),
+               "asked_effort": asked_effort, "mode": GW.router.mode, "shape": shape(req),
                **{k: d.get(k) for k in ("model", "upstream", "effort", "reason", "task", "complexity", "floor", "lambda", "est_cost",
                                         "switched_from", "candidates") if d.get(k) is not None}}
-        if d["action"] == "answer":
+        if (GW.router.sessions.get(sid) or {}).get("ctx_drop"):
+            rec["context_drop"] = True  # the client sent far less than this session's peak: its history or toolbox is gone
+        if shadow:
+            # Decide and log, but send the request untouched: the report compares what routing would have used with what was used.
+            rec.update(shadow=True, would=d.get("model") or d["action"])
+            sent = {"model": short(req.get("model")), "effort": asked_effort}
+            self._anthropic(req, {"action": "forward", "model": None, "id": None, "effort": None, "reason": "shadow"}, rec, h, shadow=True)
+        elif d["action"] == "answer":
+            sent = {"model": "auto-router", "effort": None}
             self._answer(req, d)
             if d.get("resume"):
                 GW.save_queue()
         elif d["upstream"] == "gemini":
+            sent = {"model": short(d["model"]), "effort": d.get("effort")}
             self._gemini(req, d, rec)
         else:
+            sent = {"model": short(d["model"]), "effort": d.get("effort") or asked_effort}
             self._anthropic(req, d, rec, h)
+        if rec.get("class") == "main" and (rec.get("status") or 0) in (400, 408, 413, 422) + tuple(range(500, 600)):  # not 401/403/429: not the model's fault
+            GW.router.note_failure(sid)  # the upstream refused or broke: the model in use failed this task
         rec["ms"] = int((time.time() - t0) * 1000)
         log(rec)
         if sid:
-            GW.publish(sid, d)
+            GW.publish(sid, d, sent)
 
-    def _anthropic(self, req: dict, d: dict, rec: dict, h: dict, retried=False):
+    def _anthropic(self, req: dict, d: dict, rec: dict, h: dict, retried=False, shadow=False):
         out = dict(req)
         if d.get("id"):
             out["model"] = d["id"]
@@ -402,7 +447,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(502, tr.error_body(502, "auto-router gateway: Anthropic unreachable"))
         hdrs = dict(resp.getheaders())
         rec["status"] = resp.status
-        if resp.status == 429 and not retried and d.get("reason") not in ("picker pin",) and \
+        if resp.status == 429 and not retried and not shadow and d.get("reason") not in ("picker pin",) and \
                 str({k.lower(): v for k, v in hdrs.items()}.get("anthropic-ratelimit-unified-status", "")).lower() == "rejected":
             resp.read()
             conn.close()
@@ -415,6 +460,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._gemini(req, d2, rec)
             return self._anthropic(req, d2, rec, h, retried=True)
         GW.router.note_plan(hdrs)
+        if shadow and resp.status == 429:
+            GW.router.mark_claude_limited(hdrs)  # keep the plan state current; the client sees the real answer
         low = {k.lower(): v for k, v in hdrs.items()}
         rec["plan"] = {k[len("anthropic-ratelimit-unified-"):]: v for k, v in low.items()
                        if k.startswith("anthropic-ratelimit-unified-") and k.endswith(("status", "utilization"))}
@@ -424,7 +471,7 @@ class Handler(BaseHTTPRequestHandler):
         oreq = tr.to_openai(req, d["id"], gemini=True)
         if d.get("effort"):
             oreq["reasoning_effort"] = d["effort"]
-        label = req.get("model") or d["id"]
+        label = d["id"]  # the real model: a Claude label made the client treat a Gemini answer (and its context size) as Claude's
         conn = http.client.HTTPSConnection(GEMINI_HOST, timeout=900)
         try:
             conn.request("POST", "/v1beta/openai/chat/completions", body=json.dumps(oreq, ensure_ascii=False).encode(),
@@ -444,7 +491,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(status, tr.error_body(status, f"Gemini ({d['id']}): {err[:400]}"))
         prefix = None
         if d.get("notice"):
-            prefix = "> ℹ️ A cota do Claude acabou; esta resposta simples veio do " + d["model"] + ".\n\n"
+            prefix = GW.router.msg("gemini_notice", model=d["model"])
         if not req.get("stream"):
             msg = tr.to_anthropic(json.loads(resp.read()), label)
             conn.close()
@@ -478,7 +525,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _answer(self, req: dict, d: dict):
         """The gateway's own reply, in the Anthropic format Claude Code expects."""
-        label = req.get("model") or "claude-sonnet-5-5"
+        label = "auto-router"
         text = d.get("text", "")
         if d.get("status", 200) != 200:
             return self._send_json(d["status"], tr.error_body(d["status"], text))

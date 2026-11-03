@@ -21,10 +21,22 @@ def snap(u5, u7, reset5=NOW + 3 * 3600, reset7=NOW + 3 * DAY, status="allowed"):
                                                       "7d": {"utilization": u7, "reset": reset7}}}
 
 
-def cfg():
+def cfg_default():
+    """The product default: Gemini enabled but only for the classifier and tools, never the conversation."""
     c = rt.load_config(local_path="/nonexistent")
     for m in ("gemini-flash-lite", "gemini-flash", "gemini-pro", "gemini-argon"):
         c["models"][m]["enabled"] = True
+    c["funding"]["google"] = {"kind": "money", "currency": "USD", "lots": [{"remaining": 10, "ends": "2027-06-30"}],
+                              "prepaid": {"amount": 8}, "allow_payg": False}
+    return c
+
+
+def cfg():
+    """A mixed setup that exercises the mechanism itself: Gemini may take the main loop, no main floor."""
+    c = cfg_default()
+    for m in ("gemini-flash-lite", "gemini-flash", "gemini-pro", "gemini-argon"):
+        c["models"][m]["roles"] = ["main", "auxiliary", "classifier", "tools"]
+    c["quality"]["main_floor"] = 0
     c["funding"]["google"] = {"kind": "money", "currency": "USD", "lots": [{"remaining": 10, "ends": "2027-06-30"}],
                               "prepaid": {"amount": 8}, "allow_payg": False}
     return c
@@ -54,6 +66,7 @@ def make(conf=None, cls=None, snapshot=None, spent=0.0):
                   outcomes=rt.Outcomes(os.path.join(tmp, "outcomes.json")), env={"GEMINI_API_KEY": "x"}, clock=lambda: NOW,
                   settings={"safety_mode": "on", "sensitive_guard": "on", "sensitive_allowed": {"trusted"}, "images": "trusted_only",
                             "fail_mode": "closed", "mask_secrets": "on", "mask_pii": "off"})
+    r.features = {"resume_on_reset": True, "notifications": False}
     r.claude_snapshot = snapshot if snapshot is not None else snap(0.3, 0.45, reset5=NOW + 2 * 3600, reset7=NOW + 3.5 * DAY)
     return r
 
@@ -359,6 +372,156 @@ class Flow(unittest.TestCase):
         r = make(cls=classifier("qa", 1))
         r.decide(req("minha chave é sk-ant-api03-" + "a" * 40), hdr())
         self.assertTrue(r.sessions["s1"]["sensitive"])
+
+
+class Incident20261102(unittest.TestCase):
+    """One test per cause of the 2026-11-02 incident (docs/INCIDENTS.md): the gateway was switched on and the agent turned 'dumb'."""
+
+    def test_d1_rejected_5h_window_that_already_reset_is_not_exhausted(self):
+        w5, w7 = NOW - 3600, NOW + 3 * DAY  # the 5 h window was rejected and has reset; the week is fine
+        sn = {"ts": NOW - 4 * 3600, "status": "rejected", "overage": "allowed",
+              "windows": {"5h": {"utilization": 1.0, "reset": w5, "status": "rejected"},
+                          "7d": {"utilization": 0.38, "reset": w7, "status": "allowed"}}}
+        st = funding.claude_state(sn, NOW)
+        self.assertFalse(st["exhausted"])
+        self.assertEqual(st["windows"]["5h"]["utilization"], 0.0)
+
+    def test_d1_rejected_window_blocks_only_until_its_own_reset(self):
+        r5 = NOW + 2 * 3600
+        sn = {"ts": NOW, "status": "rejected", "windows": {"5h": {"utilization": 1.0, "reset": r5, "status": "rejected"},
+                                                           "7d": {"utilization": 0.38, "reset": NOW + 3 * DAY, "status": "allowed"}}}
+        st = funding.claude_state(sn, NOW)
+        self.assertTrue(st["exhausted"])
+        self.assertEqual(st["until"], r5)  # not the week's reset
+
+    def test_d1_overall_rejected_without_window_status_still_blocks(self):
+        sn = {"ts": NOW, "status": "rejected", "windows": {"5h": {"utilization": 0.5, "reset": NOW + 3600}}}
+        self.assertTrue(funding.claude_state(sn, NOW)["exhausted"])
+
+    def test_d2_default_never_gives_the_conversation_to_gemini(self):
+        c = cfg_default()
+        r = make(conf=c, cls=classifier("qa", 1))
+        d = r.decide(req("what does this do?"), hdr())
+        self.assertEqual(d["upstream"], "anthropic")
+        self.assertTrue(all(name.startswith("claude") for name, *_ in d["candidates"]))
+        aux = r.decide(req("title"), hdr(rclass="auxiliary", sid="s9"))
+        self.assertEqual(aux["upstream"], "anthropic")
+
+    def test_d2_main_floor_raises_a_trivial_question_for_the_agent_loop(self):
+        r = make(conf=cfg_default(), cls=classifier("qa", 1))
+        d = r.decide(req("hi"), hdr())
+        self.assertGreaterEqual(d["required"], 3.0)
+
+    def test_d3_continuation_inherits_the_work_in_progress(self):
+        calls = []
+        base = classifier("refactor", 4, depth=4)
+
+        def counting(text, checkpoint=False, sensitive=False):
+            calls.append(text)
+            return base(text, checkpoint, sensitive)
+        c = cfg_default()
+        c["patterns"] = {"continue_extra": ["sim", "travou"], "complaint_extra": []}  # the person's own language, from config/local
+        r = make(conf=c, cls=counting)
+        d1 = r.decide(req("refactor the router module into two files"), hdr("p1"))
+        for follow in ("continue", "sim", "travou?", "Yes", "hung?"):
+            before = len(calls)
+            d = r.decide(req(follow), hdr("p" + follow))
+            self.assertEqual(len(calls), before, follow)  # not even classified
+            self.assertEqual((d["task"], d["complexity"]), ("refactor", 4), follow)
+        self.assertEqual(d1["task"], "refactor")
+
+    def test_d3_a_real_new_question_is_still_classified(self):
+        calls = []
+        base = classifier("qa", 1)
+
+        def counting(text, checkpoint=False, sensitive=False):
+            calls.append(text)
+            return base(text, checkpoint, sensitive)
+        r = make(conf=cfg_default(), cls=counting)
+        r.decide(req("refactor the router module into two files"), hdr("p1"))
+        r.decide(req("why is the sky blue in the evening?"), hdr("p2"))
+        self.assertEqual(len(calls), 2)
+
+    def test_d3_checkpoint_is_about_the_current_prompt_not_the_first(self):
+        r = make()
+        msgs = [{"role": "user", "content": "first old request"}, {"role": "assistant", "content": "done"},
+                {"role": "user", "content": "the current request"}]
+        text = r._checkpoint_text(msgs)
+        self.assertTrue(text.startswith("Current request:\nthe current request"))  # was the session's FIRST prompt
+
+    def test_d3_checkpoint_never_lowers_task_or_difficulty_unless_mechanical(self):
+        seq = [analysis("refactor", 4, depth=4), analysis("explain_code", 1)]  # the checkpoint answers something much easier
+        it = iter(seq)
+
+        def cls(text, checkpoint=False, sensitive=False):
+            return dict(next(it), source="checkpoint" if checkpoint else "llm")
+        r = make(conf=cfg_default(), cls=cls)
+        base = [{"role": "user", "content": [{"type": "text", "text": "refactor the router module"}]}]
+        r.decide(req(messages=base), hdr("p1"))
+        r.decide(req(messages=tool_step(base, n=4)), hdr("p1"))  # checkpoint after 4 tool steps
+        self.assertEqual((r.sessions["s1"]["a"]["task"], r.sessions["s1"]["a"]["complexity"]), ("refactor", 4))
+
+    def test_d7_context_drop_is_flagged_and_inherits(self):
+        r = make(conf=cfg_default(), cls=classifier("feature", 4, depth=4))
+        big = [{"role": "user", "content": [{"type": "text", "text": "implement the feature " + "x" * 120000}]}]
+        r.decide(req(messages=big), hdr("p1"))
+        d = r.decide(req("ok"), hdr("p2"))  # the client suddenly sends almost nothing
+        self.assertTrue(r.sessions["s1"]["ctx_drop"])
+        self.assertEqual(d["task"], "feature")
+
+    def test_d8_outcome_keys_are_not_double_counted_without_a_project(self):
+        o = rt.Outcomes(os.path.join(tempfile.mkdtemp(), "o.json"))
+        o.record("*", "qa", "c1-2", "claude-haiku-cli", True)
+        self.assertEqual(o.data, {"*|qa|c1-2|claude-haiku-cli": [1, 0]})
+
+    def test_d8_complaint_after_an_answer_counts_as_a_failure(self):
+        r = make(conf=cfg_default(), cls=classifier("debug", 3, depth=3))
+        r.decide(req("fix the bug in parser.py"), hdr("p1"))
+        r.decide(req("that did not work, still broken"), hdr("p2"))
+        fails = [v for k, v in r.outcomes.data.items() if "|debug|" in k]
+        self.assertTrue(fails and all(f[1] == 1 for f in fails))
+
+    def test_d8_upstream_error_is_a_failure(self):
+        r = make(conf=cfg_default(), cls=classifier("debug", 3, depth=3))
+        r.decide(req("fix the bug"), hdr("p1"))
+        r.note_failure("s1")
+        self.assertTrue(any(v[1] == 1 for v in r.outcomes.data.values()))
+
+    def test_working_dir_is_found_in_the_first_user_turn_too(self):
+        r = {"system": "no folder here", "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "<system-reminder>Primary working directory: /home/x/proj</system-reminder>"}]}]}
+        self.assertEqual(rt.working_dir(r), "/home/x/proj")
+
+    def test_warm_cache_keeps_the_model_for_a_big_context(self):
+        r = make(conf=cfg_default())
+        sess = r._session("x")
+        need = {"tools": True, "ctx": 300000}
+        sess["warm"]["claude-sonnet-cli"] = NOW
+        rows, _ = r.candidates(analysis("codegen", 2), 3, need, sess, "*")
+        cost = {x["name"]: x["cost"] for x in rows}
+        self.assertLess(cost["claude-sonnet-cli"], cost["claude-haiku-cli"])  # a warm Sonnet reads 300k cheaper than a cold Haiku
+
+    def test_shadow_is_the_default_mode_and_texts_are_configurable(self):
+        r = make(conf=cfg_default())
+        self.assertEqual(r.mode, "shadow")
+        r.cfg["mode"] = "route"
+        self.assertEqual(r.mode, "route")
+        r.cfg["messages"]["resume_notify"] = "Parado {when}"
+        self.assertEqual(r.msg("resume_notify", when="x"), "Parado x")
+
+
+class Shape(unittest.TestCase):
+    def test_shape_has_sizes_but_no_text(self):
+        sh = server.shape(req("SECRET PROMPT TEXT"))
+        self.assertEqual(sh["tools"], 1)
+        self.assertEqual(sh["msgs"], 1)
+        self.assertEqual(sh["blocks"], {"text": 1})
+        self.assertNotIn("SECRET", str(sh))
+
+    def test_short_names(self):
+        self.assertEqual(server.short("claude-sonnet-5-5"), "sonnet")
+        self.assertEqual(server.short("claude-haiku-cli"), "haiku")
+        self.assertEqual(server.short("gemini-3.8-flash"), "gemini-3.8-flash")
 
 
 if __name__ == "__main__":

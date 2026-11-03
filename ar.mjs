@@ -25,6 +25,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createUmbrella, buildReport, auditContext, DESCRIPTIONS, ORDER } from "./scripts/umbrella.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DATA = path.join(ROOT, "data");
@@ -767,7 +768,7 @@ async function up(flags) {
   if (!flags["no-bridge"]) await bridgeUp();
 }
 async function down() { compose(["down"]); bridgeDown(); }
-async function status() {
+async function legacyStatus() {
   const env0 = readEnv() || {};
   info(`safety: ${env0.SAFETY_MODE || "on"} · sensitive guard: ${env0.SENSITIVE_GUARD || "on"}`);
   const g = await http(`${GATEWAY}/health/liveliness`, { timeout: 3000 });
@@ -1257,7 +1258,7 @@ function usage(flags) {
 }
 
 // ---------------------------------------------------------------- main
-// ---------------------------------------------------------------- v0.6: Claude Code gateway (docs/GATEWAY.md)
+// ---------------------------------------------------------------- 1.0: Claude Code gateway (docs/GATEWAY.md)
 // A light local process (Python + PyYAML in its own venv), always on as a per-user login service; Claude Code reaches it through
 // ANTHROPIC_BASE_URL in ~/.claude/settings.json, so the claude.ai login keeps being used.
 const GW_PORT = 4001;
@@ -1355,6 +1356,10 @@ async function gatewayCmd(flags, rest) {
   if ((s.resume_queue || []).length) info(`resume queued: ${s.resume_queue.map((r) => path.basename(r.cwd) + " at " + new Date(r.at * 1000).toLocaleString()).join(", ")}`);
 }
 
+const MANIFEST = path.join(HOME_CFG_DIR, "installed.json");
+function readManifest() { try { return JSON.parse(fs.readFileSync(MANIFEST, "utf8")); } catch { return {}; } }
+function writeManifest(m) { fs.mkdirSync(HOME_CFG_DIR, { recursive: true }); fs.writeFileSync(MANIFEST, JSON.stringify(m, null, 2)); }
+
 function readClaudeSettings() {
   try { return JSON.parse(fs.readFileSync(CLAUDE_SETTINGS, "utf8")); } catch (e) { if (fs.existsSync(CLAUDE_SETTINGS)) throw e; return {}; }
 }
@@ -1378,10 +1383,19 @@ async function claudeCodeCmd(flags, rest) {
   if (sub === "on") {
     next.env.ANTHROPIC_BASE_URL = GW_URL;
     next.env.CLAUDE_CODE_GATEWAY_HINT_HEADERS = "1";
-    if (!next.model || /opus/i.test(next.model)) next.model = "sonnet"; // the gateway's auto_model: requests for it are routed by `auto`
+    if (!next.model || /opus/i.test(next.model)) { // the gateway's auto_model: requests for it are routed by `auto`
+      const m = readManifest();
+      if (!m.claude_code) writeManifest({ ...m, claude_code: { previous_model: next.model ?? null } });
+      next.model = "sonnet";
+    }
   } else {
     if (next.env.ANTHROPIC_BASE_URL === GW_URL) delete next.env.ANTHROPIC_BASE_URL;
     delete next.env.CLAUDE_CODE_GATEWAY_HINT_HEADERS;
+    const m = readManifest();
+    if (m.claude_code) { // give back the model that was set before `on` (only if it is still the one we set)
+      if (next.model === "sonnet") { if (m.claude_code.previous_model) next.model = m.claude_code.previous_model; else delete next.model; }
+      const { claude_code, ...rest2 } = m; writeManifest(rest2);
+    }
   }
   if (!Object.keys(next.env).length) delete next.env;
   fs.mkdirSync(path.dirname(CLAUDE_SETTINGS), { recursive: true });
@@ -1391,7 +1405,140 @@ async function claudeCodeCmd(flags, rest) {
   info(`backup: ${backup}`);
 }
 
+
+// ---------------------------------------------------------------- v1.0: the umbrella (scripts/umbrella.mjs)
+function companionVsix() {
+  return import("./scripts/build-vsix.mjs").then(({ buildVsix }) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ar-vsix-"));
+    const vsix = path.join(dir, "auto-router-companion.vsix");
+    fs.writeFileSync(vsix, buildVsix());
+    return vsix;
+  });
+}
+function companionInstalled() {
+  try { return fs.readdirSync(path.join(os.homedir(), ".vscode", "extensions")).some((d) => d.startsWith("local.auto-router-companion-")); } catch { return false; }
+}
+async function companionInstall() {
+  const code = findCode();
+  if (!code) { warn("could not find the `code` command; install vscode-extension/auto-router-companion.vsix by hand"); return false; }
+  const r = run(code, ["--install-extension", await companionVsix(), "--force"]);
+  return r.status === 0;
+}
+async function companionUninstall() {
+  const code = findCode();
+  if (code && companionInstalled()) run(code, ["--uninstall-extension", "local.auto-router-companion"]);
+  return true;
+}
+function umbrella() {
+  return createUmbrella({
+    root: ROOT, say: warn,
+    actions: {
+      gatewayInstall: async () => { await gatewayCmd({}, ["gateway", "install"]); return gatewayHealthy(5000); },
+      gatewayUninstall: async () => { await gatewayCmd({}, ["gateway", "uninstall"]); return true; },
+      gatewayHealthy: () => gatewayHealthy(1500),
+      claudeCodeOn: async () => { await claudeCodeCmd({}, ["claude-code", "on"]); return readClaudeSettings().env?.ANTHROPIC_BASE_URL === GW_URL; },
+      claudeCodeOff: async () => { await claudeCodeCmd({}, ["claude-code", "off"]); return true; },
+      companionInstall, companionUninstall, companionInstalled: async () => companionInstalled(),
+      legacyUp: async () => { await up({}); return true; },
+      legacyDown: async () => { await down(); return true; },
+      legacyRunning: async () => (await http(`${GATEWAY}/health/liveliness`, { timeout: 1500 })).status === 200,
+    },
+  });
+}
+// Switching the gateway off from a session that goes THROUGH it cuts that session's own connection (incident 2026-11-02).
+function routedHere(flags) {
+  if (!String(process.env.ANTHROPIC_BASE_URL || "").includes(`:${GW_PORT}`) || flags.force) return false;
+  bad("this terminal/session talks to Anthropic THROUGH the gateway; switching it off here would cut the session itself.");
+  info("Run it from a normal terminal, or pass --force.");
+  return true;
+}
+const mark = (b) => (b ? c(32, "on ") : c(90, "off"));
+async function onCmd(flags) {
+  const res = await umbrella().on();
+  for (const [n, r] of Object.entries(res)) (r === "on" ? ok : warn)(`${n}: ${r}`);
+  if (!Object.keys(res).length) info("the umbrella is on, but no feature is wanted yet: node ar.mjs feature list");
+}
+async function offCmd(flags) {
+  if (routedHere(flags)) return;
+  const res = await umbrella().off();
+  for (const [n, r] of Object.entries(res)) (r === "off" ? ok : warn)(`${n}: ${r}`);
+  ok("auto-router is off; Claude Code talks to Anthropic directly (new sessions). Your choices are kept: node ar.mjs on");
+}
+async function featureCmd(flags, rest) {
+  const u = umbrella(), name = rest[1], val = rest[2];
+  if (!name || name === "list") {
+    const { enabled, rows } = await u.list();
+    info(`umbrella: ${enabled ? "on" : "off"}`);
+    for (const r of rows) console.log(`  ${mark(r.wanted)} ${r.installed ? c(32, "installed") : c(90, "not installed")}  ${r.name.padEnd(21)} ${r.what}`);
+    return;
+  }
+  if (!["on", "off"].includes(val)) return bad("usage: node ar.mjs feature <name> on|off | list");
+  if (val === "off" && ["gateway", "claude_code"].includes(name) && routedHere(flags)) return;
+  try { const r = await u.set(name, val === "on"); (r === "on" || r === "off" ? ok : warn)(`${name}: ${r}`); } catch (e) { bad(e.message); }
+}
+async function modeCmd(rest) {
+  const m = rest[1], file = path.join(ROOT, "config", "local", "gateway.yaml");
+  const st = (await http(`${GW_URL}/state`, { timeout: 2000 })).json || {};
+  if (!m) return info(`mode: ${st.mode || "(gateway not answering)"}   shadow = decide and log, send everything as asked · route = send to the chosen model and effort`);
+  if (!["shadow", "route"].includes(m)) return bad("usage: node ar.mjs mode shadow|route");
+  let text = ""; try { text = fs.readFileSync(file, "utf8"); } catch {}
+  text = /^mode:.*$/m.test(text) ? text.replace(/^mode:.*$/m, `mode: ${m}`) : `mode: ${m}\n${text}`;
+  fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, text);
+  ok(`mode: ${m}`);
+  if (await gatewayHealthy()) await gatewayCmd({}, ["gateway", "restart"]);
+}
+async function reportCmd(flags) {
+  const f = [path.join(DATA, "gateway.jsonl.1"), path.join(DATA, "gateway.jsonl")];
+  const lines = f.flatMap((p) => { try { return fs.readFileSync(p, "utf8").split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean); } catch { return []; } });
+  const span = String(flags.since || "24h"), n = parseFloat(span), ms = n * (span.endsWith("d") ? 86400e3 : span.endsWith("m") ? 60e3 : 3600e3);
+  const r = buildReport(lines, ms);
+  info(`main-loop requests in the last ${span}: ${r.requests}  (shadow ${r.shadow} · routed ${r.route})`);
+  if (!r.requests) return info("nothing yet: use Claude Code with the gateway on.");
+  info(`asked:   ${Object.entries(r.asked).map(([k, v]) => `${k} ${v}`).join(" · ")}`);
+  info(`auto:    ${Object.entries(r.would).map(([k, v]) => `${k} ${v}`).join(" · ")}   (${r.changed} would differ from what was asked)`);
+  info(`effort:  ${Object.entries(r.effort).map(([k, v]) => `${k} ${v}`).join(" · ") || "-"}`);
+  info(`list-price estimate (no cache discount): asked ≈ US$ ${r.estCostAskedUsd.toFixed(2)} → auto ≈ US$ ${(r.estCostAskedUsd - r.estSavingUsd).toFixed(2)}  (saving ≈ ${r.estCostAskedUsd ? Math.round((100 * r.estSavingUsd) / r.estCostAskedUsd) : 0}%)`);
+  if (r.cacheHit != null) info(`prompt-cache hit: ${Math.round(r.cacheHit * 100)}% of input tokens`);
+  if (r.drops) warn(`${r.drops} request(s) arrived far smaller than their session's peak (history or tools lost on the client side)`);
+  if (r.errors) warn(`${r.errors} request(s) were refused or failed upstream`);
+}
+function geminiCmd(rest) {
+  const py = fs.existsSync(GW_PY) ? GW_PY : which("python3") || which("python");
+  if (!py) return bad("Python 3.9+ not found");
+  const r = spawnSync(py, [path.join(ROOT, "gateway", "gemini_cli.py"), ...rest.slice(1)], { stdio: "inherit" });
+  process.exitCode = r.status ?? 1;
+}
+function optimizeCmd() {
+  const { items, tips } = auditContext({});
+  for (const it of items) info(`${it.label}: ${it.lines} lines, ~${it.tokens} tokens (${it.file})`);
+  if (!tips.length) ok("nothing to improve that this audit can see; /usage in Claude Code has more (press f to apply its fixes)");
+  for (const t of tips) warn(t);
+}
+async function statusCmd(flags) {
+  const u = umbrella(), { enabled, rows } = await u.list();
+  info(`auto-router ${fs.readFileSync(path.join(ROOT, "VERSION"), "utf8").trim()} · umbrella ${enabled ? "on" : "off"}`);
+  const g = await http(`${GW_URL}/state`, { timeout: 2000 });
+  if (g.status === 200) {
+    const s = g.json || {}, w = s.claude?.windows || {};
+    const pct = (x) => (x?.utilization != null ? `${Math.round(x.utilization * 100)}%` : "?");
+    ok(`gateway ${GW_URL} · mode ${s.mode} · plan 5h ${pct(w["5h"])} 7d ${pct(w["7d"])}${s.claude?.exhausted ? " · EXHAUSTED" : ""}`);
+    for (const [sid, d] of Object.entries(s.sessions || {}).slice(-3)) info(`session ${sid.slice(0, 8)}: sent ${d.sent?.model || "?"} (${d.sent?.effort || "-"}) · auto ${d.model} (${d.effort || "-"}) · ${d.reason}`);
+  } else bad(`gateway ${GW_URL} not answering`);
+  info(`Claude Code → ${readClaudeSettings().env?.ANTHROPIC_BASE_URL === GW_URL ? "through the gateway" : "Anthropic directly"}`);
+  for (const r of rows) info(`${mark(r.wanted)} ${r.installed ? "installed    " : "not installed"} ${r.name}`);
+  if (rows.find((r) => r.name === "legacy_stack")?.wanted || flags.all) await legacyStatus();
+}
+
 const HELP = `auto-router — node ar.mjs <command>
+
+  on | off    the whole umbrella at once: off always puts Claude Code back on Anthropic directly and removes what was installed
+  feature     list | <name> on|off   switch one part: gateway, claude_code, gemini_tools, token_hooks, haiku_subagents, compact_instructions,
+              terse_style, statusline, vscode_status, resume_on_reset, notifications, legacy_stack
+  status      the umbrella, the gateway, the model and effort in use, the plan
+  mode        [shadow|route]   shadow = decide and log only · route = really send to the chosen model and effort
+  report      [--since 24h|7d]   what routing chose, and what it saves, against what Claude Code asked for
+  gemini      digest|media|research|review|batch ...   Gemini as a tool the Claude calls (reads big things cheaply)
+  optimize    audit context size, MCP servers and hooks for token waste
 
   gateway     install|uninstall|restart|status   the Claude Code gateway (auto routing) as an always-on login service
   claude-code on|off|status   point Claude Code at the gateway; off = straight to Anthropic again
@@ -1432,7 +1579,14 @@ async function main() {
     case "cloudflare-token": return cloudflareToken();
     case "up": return up(flags);
     case "down": return down();
-    case "status": return status();
+    case "status": return statusCmd(flags);
+    case "on": return onCmd(flags);
+    case "off": return offCmd(flags);
+    case "feature": return featureCmd(flags, rest);
+    case "mode": return modeCmd(rest);
+    case "report": return reportCmd(flags);
+    case "gemini": return geminiCmd(rest);
+    case "optimize": return optimizeCmd();
     case "omniroute": return flags.check ? omnirouteCheck() : omniroute(flags);
     case "omniroute-upgrade": return omnirouteUpgrade(flags);
     case "vscode": return vscode(flags);

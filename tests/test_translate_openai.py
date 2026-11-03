@@ -38,7 +38,7 @@ class ToOpenAI(unittest.TestCase):
         call = out["messages"][2]["tool_calls"][0]
         self.assertEqual(json.loads(call["function"]["arguments"]), {"path": "a.py"})
         self.assertEqual(call["extra_content"]["google"]["thought_signature"], tr.SKIP_SIGNATURE)  # Claude's call: no signature
-        self.assertEqual(out["messages"][3], {"role": "tool", "tool_call_id": "t1", "content": "x=1"})
+        self.assertEqual(out["messages"][3], {"role": "tool", "tool_call_id": "t1", "name": "Read", "content": "x=1"})
         self.assertEqual(len(out["tools"]), 1)  # server tool dropped
         params = out["tools"][0]["function"]["parameters"]
         self.assertNotIn("$schema", params)
@@ -47,8 +47,36 @@ class ToOpenAI(unittest.TestCase):
         self.assertTrue(out["stream"] and out["stream_options"]["include_usage"])
 
     def test_error_result_marked(self):
-        req = {"messages": [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "is_error": True, "content": "boom"}]}]}
-        self.assertEqual(tr.to_openai(req, "m")["messages"][0]["content"], "ERROR: boom")
+        req = {"messages": [{"role": "assistant", "content": [{"type": "tool_use", "id": "t", "name": "Bash", "input": {}}]},
+                            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "is_error": True, "content": "boom"}]}]}
+        self.assertEqual(tr.to_openai(req, "m")["messages"][1]["content"], "ERROR: boom")
+
+    def test_orphan_tool_result_becomes_text(self):
+        # Gemini answered 400 "function_response.name: Name cannot be empty" for a result whose call is not in the history
+        req = {"messages": [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "gone", "content": "data"},
+                                                         {"type": "text", "text": "go on"}]}]}
+        msgs = tr.to_openai(req, "m")["messages"]
+        self.assertEqual([m["role"] for m in msgs], ["user"])
+        self.assertIn("data", msgs[0]["content"])
+        self.assertIn("go on", msgs[0]["content"])
+
+    def test_nameless_call_is_not_forwarded(self):
+        req = {"messages": [{"role": "assistant", "content": [{"type": "tool_use", "id": "x", "name": "", "input": {}}, {"type": "text", "text": "hi"}]},
+                            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "x", "content": "r"}]}]}
+        msgs = tr.to_openai(req, "m")["messages"]
+        self.assertFalse(any(m.get("tool_calls") or m["role"] == "tool" for m in msgs))
+
+    def test_tool_reference_becomes_text(self):
+        req = {"messages": [{"role": "assistant", "content": [{"type": "tool_use", "id": "t", "name": "ToolSearch", "input": {}}]},
+                            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t",
+                                                          "content": [{"type": "tool_reference", "tool_name": "WebFetch"}]}]}]}
+        self.assertIn("WebFetch", tr.to_openai(req, "m")["messages"][1]["content"])
+
+    def test_repair_args(self):
+        self.assertEqual(tr.repair_args('{"url": "a"}{"prompt": "b"}'), {"url": "a", "prompt": "b"})
+        self.assertEqual(tr.repair_args('{"a": 1}'), {"a": 1})
+        self.assertEqual(tr.repair_args("not json"), {})
+        self.assertEqual(tr.repair_args(None), {})
 
     def test_non_gemini_keeps_schema(self):
         req = {"messages": [{"role": "user", "content": "hi"}],
@@ -71,10 +99,11 @@ class Stream(unittest.TestCase):
         ev = _events(raw)
         types = [e["type"] for e in ev]
         self.assertEqual(types, ["message_start", "content_block_start", "content_block_delta", "content_block_stop",
-                                 "content_block_start", "content_block_delta", "content_block_delta", "content_block_stop",
+                                 "content_block_start", "content_block_delta", "content_block_stop",
                                  "message_delta", "message_stop"])
         self.assertEqual(ev[0]["message"]["model"], "claude-sonnet-5-5")
         self.assertEqual(ev[4]["content_block"], {"type": "tool_use", "id": "call_1", "name": "Read", "input": {}})
+        self.assertEqual(len([e for e in ev if e.get("delta", {}).get("type") == "input_json_delta"]), 1)  # one valid JSON
         args = "".join(e["delta"]["partial_json"] for e in ev if e.get("delta", {}).get("type") == "input_json_delta")
         self.assertEqual(json.loads(args), {"path": "a.py"})
         self.assertEqual(ev[-2]["delta"]["stop_reason"], "tool_use")  # Gemini says "stop" even with a tool call
@@ -82,6 +111,44 @@ class Stream(unittest.TestCase):
         # the signature comes back on the next turn
         back = tr.to_openai({"messages": [{"role": "assistant", "content": [{"type": "tool_use", "id": "call_1", "name": "Read", "input": {}}]}]}, "g")
         self.assertEqual(back["messages"][0]["tool_calls"][0]["extra_content"]["google"]["thought_signature"], "SIG")
+
+    def _calls(self, chunks):
+        st = tr.StreamTranslator("m")
+        raw = b"".join(st.feed(b"data: " + json.dumps(c).encode()) for c in chunks) + st.finish()
+        ev = _events(raw)
+        starts = [e["content_block"] for e in ev if e["type"] == "content_block_start" and e["content_block"]["type"] == "tool_use"]
+        args = [json.loads(e["delta"]["partial_json"]) for e in ev if e.get("delta", {}).get("type") == "input_json_delta"]
+        return starts, args
+
+    def test_parallel_calls_without_index_stay_separate(self):
+        # incident 2026-11-02: two calls with no/same index were merged into one with arguments `{"url":..}{"prompt":..}`
+        starts, args = self._calls([
+            {"choices": [{"delta": {"tool_calls": [{"id": "a", "function": {"name": "WebFetch", "arguments": '{"url": "u"}'}}]}}]},
+            {"choices": [{"delta": {"tool_calls": [{"id": "b", "function": {"name": "WebSearch", "arguments": '{"query": "q"}'}}]},
+                          "finish_reason": "stop"}]}])
+        self.assertEqual([c["name"] for c in starts], ["WebFetch", "WebSearch"])
+        self.assertEqual(args, [{"url": "u"}, {"query": "q"}])
+
+    def test_parallel_calls_with_repeated_index_stay_separate(self):
+        starts, args = self._calls([
+            {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "a", "function": {"name": "Read", "arguments": '{"p": 1}'}}]}}]},
+            {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "b", "function": {"name": "Grep", "arguments": '{"p": 2}'}}]}}]}])
+        self.assertEqual([c["id"] for c in starts], ["a", "b"])
+        self.assertEqual(args, [{"p": 1}, {"p": 2}])
+
+    def test_openai_style_split_arguments_and_interleaving(self):
+        starts, args = self._calls([
+            {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "a", "function": {"name": "Read", "arguments": '{"p":'}},
+                                                   {"index": 1, "id": "b", "function": {"name": "Grep", "arguments": '{"q":'}}]}}]},
+            {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": ' 1}'}}, {"index": 1, "function": {"arguments": ' 2}'}}]}}]}])
+        self.assertEqual(args, [{"p": 1}, {"q": 2}])
+
+    def test_upstream_error_mid_stream_is_an_error_event(self):
+        st = tr.StreamTranslator("m")
+        raw = st.feed(b'data: {"choices": [{"delta": {"content": "hi"}}]}') + st.feed(b'data: {"error": {"message": "overloaded"}}') + st.finish()
+        ev = _events(raw)
+        self.assertEqual(ev[-1]["type"], "error")
+        self.assertNotIn("message_stop", [e["type"] for e in ev])
 
     def test_empty_stream_is_well_formed(self):
         ev = _events(tr.StreamTranslator("m").finish())
@@ -96,6 +163,11 @@ class NonStream(unittest.TestCase):
         self.assertEqual(msg["stop_reason"], "tool_use")
         self.assertEqual(msg["content"], [{"type": "tool_use", "id": "c", "name": "Bash", "input": {"command": "ls"}}])
         self.assertEqual(msg["usage"], {"input_tokens": 5, "output_tokens": 2})
+
+    def test_glued_arguments_are_repaired(self):
+        resp = {"choices": [{"finish_reason": "stop", "message": {"content": None, "tool_calls": [
+            {"id": "c", "function": {"name": "WebFetch", "arguments": '{"url": "u"}{"prompt": "p"}'}}]}}]}
+        self.assertEqual(tr.to_anthropic(resp, "m")["content"][0]["input"], {"url": "u", "prompt": "p"})
 
 
 if __name__ == "__main__":

@@ -102,7 +102,7 @@ Two review plans were executed in order; the facts of what was and was not verif
 - **Not implemented from the routing plan:** per-project `.auto-router/policy.yaml`; models without a key / verified id (DeepSeek, xAI Grok, Gemini 4 Argon, Llama 4 Maverick, Codestral) exist in `models.yaml` but not in `config.yaml`; `xhigh` effort is sent as `high`.
 - **A model that answers "credit balance too low" is paused for 6 h** instead of being retried on every request (found when the user's Anthropic API key had no credit and Haiku-by-API was the first choice of several cheap cells).
 
-## 2026-11-02 — v0.6 spike: a local gateway inside Claude Code keeps the subscription
+## 2026-11-02 — 1.0 spike: a local gateway inside Claude Code keeps the subscription
 Plan: route inside Claude Code (the person's real client) instead of Copilot Chat; light, no Docker, 100 % local. `gateway/spike_proxy.py`
 (stdlib only) sat between Claude Code 2.1.304 and `api.anthropic.com`, tested with `claude -p` and the claude.ai login, no API key in the env.
 - **Pass-through works.** Requests arrive with `Authorization: Bearer` (OAuth) and `anthropic-beta` containing `oauth-2025-04-20`; SSE streams
@@ -199,3 +199,18 @@ with embeddings and OpenAI compatibility).
 - Buy Anthropic API credits if the API route is wanted.
 - Consider Arch-Router as a local classifier to cut the ~1-2 s classification latency and the dependency on Google.
 - Measure daily quotas of free providers.
+
+## 2026-11-03 — 1.0: Claude-only `auto`, Gemini as a tool, shadow before route, one umbrella
+Context: the first real install of the gateway made the agent unusable (`docs/INCIDENTS.md`).
+- **Decision:** `auto` chooses among Haiku, Sonnet and Opus and the effort. Gemini never holds the conversation by default; it is the optional
+  classifier and a command the Claude calls (`node ar.mjs gemini`). A command, not an MCP server: it adds nothing to the context until run, works
+  from any client, and the official guidance prefers CLIs to MCP for context cost.
+- **Decision:** `shadow` mode is the repository default and `route` is explicit. A person may start in `route` (the owner did, with the regression
+  tests in place); the report is how anyone judges the gain.
+- **Decision:** one umbrella (`ar.mjs on|off|feature`) over every installed part; `off` is always safe and exact. Defaults are generic and off; personal
+  choices are local; examples are anonymised.
+- **Decision:** the older LiteLLM/OmniRoute stack stays as the optional feature `legacy_stack` (Copilot Chat needs it). Removing Docker entirely means an
+  OpenAI-format input adapter in the gateway for Copilot and Codex: see `docs/ROADMAP.md`.
+- **Honest limit:** the gain of routing is moderate and must be measured. Much can be had by habit (Sonnet by default, `/effort`, Haiku subagents). What
+  only the gateway does: effort per prompt, protecting the 5-hour and weekly windows, waiting and resuming after a reset, spending expiring Gemini credits.
+- **Open question (measure in `report`):** whether changing only `effort` keeps the prompt cache.

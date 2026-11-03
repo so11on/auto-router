@@ -2,24 +2,29 @@
 
 Newest first. `node ar.mjs update` shows the entries newer than the version installed on the computer.
 
-## Unreleased (v0.6 in progress, branch `v0.6-claude-gateway`)
-- **Plan for v0.6** in `docs/PLAN-v0.6.md`: routing moves inside Claude Code through a light local gateway (no Docker, 100 % local), a
-  single `auto` profile, a cost model that weighs plan quotas, expiring credits, prepayments and real money, mid-task switching with
-  per-model cache tracking, a per-project `.auto-router/` folder, and an optional "Claude quota is out: use Gemini or wait and resume" flow.
-- **Spike done** (`gateway/spike_proxy.py`, results in `docs/DECISIONS.md`): Claude Code keeps the subscription through a local
-  `ANTHROPIC_BASE_URL`; the gateway may rewrite the model; Gemini can serve Claude Code tool loops; sessions resume with `claude --resume`.
-- `gateway/translate_openai.py`: Anthropic Messages ↔ OpenAI Chat translation (tools, streaming, Gemini 3 thought signatures), with tests.
-- **Claude Code gateway** (`gateway/server.py`, `router.py`, `funding.py`; `docs/GATEWAY.md`): `auto` routing between the Claude plan
-  and paid Gemini — adequacy first, cheapest adequate model, plan/credit balance only as a tie-break, mid-task checkpoints, outcome
-  history, "plan is out: 1 best available / 2 wait and resume / 3 paid extra usage" question, resume via `claude --resume`.
-  `node ar.mjs gateway install|status|restart|uninstall` (login service) and `node ar.mjs claude-code on|off|status`.
-- Tie-break: a source projected to run out before its reset always loses inside the group of equivalent adequate models (Gemini Flash takes
-  simple work from Haiku in a tight Claude week; Argon takes Sonnet-level work).
-- `litellm/classify_rules.py`: classifier prompts and heuristic shared by the LiteLLM hook and the gateway; `policy.signals_anthropic`.
-- `models.yaml`: `reasoning` (0-5) and a 2026-11-02 calibration (Haiku ~ Flash, Flash `adequacy_bias` -0.5, Sonnet ~ Gemini 4 Argon,
-  Gemini 3.1 Pro below Flash); `gemini-argon` (`gemini-4-argon`, id verified) in `config.yaml` and the gateway.
-- Companion extension **0.4.0**: Explorer → **Add to Claude Code** (files via Claude Code's own @-mention command; folders copied as
-  `@path/` to paste). Run `node ar.mjs vscode` and reload VS Code. `docs/VSCODE-SETUP.md` documents Shift-drag (files only) and Option+K.
+## 1.0.0 — 2026-11-03
+The Claude Code gateway and an umbrella around it. Read `docs/INCIDENTS.md`: the first real install turned the agent "dumb" and this release is
+built from what that taught.
+- **Umbrella.** `node ar.mjs on|off|feature list|feature <name> on|off|status`. Everything is off by default (`gateway/features.defaults.json`);
+  your choices live in the git-ignored `config/local/`. Parts: `gateway`, `claude_code`, `gemini_tools`, `token_hooks`, `haiku_subagents`,
+  `compact_instructions`, `terse_style`, `statusline`, `vscode_status`, `resume_on_reset`, `notifications`, `legacy_stack`. `off` always
+  returns Claude Code to Anthropic directly (and gives back the start model it changed) and removes only what the umbrella installed.
+- **`auto` inside Claude Code** (`gateway/`): picks Haiku / Sonnet / Opus and the reasoning effort by adequacy first, then cost, with plan
+  and credit balance only as a tie-break. **`shadow` mode** (default: decide and log, send as asked) and **`route` mode**
+  (`node ar.mjs mode`), `node ar.mjs report`. Gemini is no longer a conversation model: it classifies and is a tool.
+- **Gemini as a tool**: `node ar.mjs gemini digest|media|research|review|batch` (`gateway/gemini_cli.py`): DLP before sending, safety checks,
+  spend in the ledger, answers cut to protect the Claude's context. Verified with real calls on 2026-11-03 (Batch API included).
+- **Model and effort in view**: `sonnet (medium)` in a status line (`templates/claude-code/statusline.mjs`) and the VS Code status bar.
+- **Token saving** (`docs/TOKEN-SAVING.md`): test-output hook, Haiku subagent for verbose work, compaction instructions, optional terse style
+  (the caveman verdict: small effect, off by default), `node ar.mjs optimize` context audit.
+- **Fixes from the incident** (D1-D9, each with a regression test): plan "exhausted" until the weekly reset after a 5-hour window had reset;
+  weak model as the agent's main loop (`quality.main_floor`, `roles`); continuations ("continue", "yes") rated as trivial; checkpoints using the
+  first prompt; tool results without `name` (Gemini 400); parallel tool calls merged into one; wrong model label in replies; lost-history
+  requests; learning that counted complaints as successes; `status` ignoring the new gateway.
+- All user-facing texts come from `messages:` in the config (English default); continuation/complaint words from `patterns:`.
+- The VS Code companion is **1.0.0**: status bar and "Add to Claude Code". The Copilot-era context status and automatic new chat are kept only
+  behind `autoRouter.legacyStack` (off). `gateway/spike_proxy.py` removed. `docs/PLAN-v0.6.md` is now `docs/ROADMAP.md`.
+- Tests: the privacy scan ignores git-ignored local state (bytecode caches, `config/local`).
 
 ## 0.5.0 — 2026-10-25
 - **Routing v3.** One table for every install: `litellm/routing.yaml` now says, per profile (free / balanced / smart), task type (14) and complexity band, which models may answer, in order. A new engine filters (safety, sensitivity, availability, tools, vision, context, quota, budget), reorders (a plan with room before a billed neighbour), applies a quality floor and a cost rule, and returns fallbacks already filtered. See `docs/ROUTING.md`.

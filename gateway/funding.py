@@ -1,6 +1,6 @@
 """Where a call's cost comes from, and how much that source "costs" right now (its shadow price λ). Stdlib only.
 
-The router minimises  tokens x price x λ(source), not the list price (docs/PLAN-v0.6.md, 3b). Source kinds:
+The router minimises  tokens x price x λ(source), not the list price (docs/ROADMAP.md, 3b). Source kinds:
   window_quota     a plan that resets (Claude 5 h + 7 d windows): unused allowance is lost at the reset, so while the plan is
                    running below its ideal pace λ falls towards 0; above it λ climbs past 1 to keep the plan for what only it can do
   expiring_credit  credit lots with their own end dates (Google AI Pro monthly credits): spent oldest-first; λ falls towards 0 only when
@@ -93,9 +93,16 @@ def claude_state(snapshot: dict, now: float = None, base: float = None, cfg: dic
         if lam == float("inf"):
             out["exhausted"] = True
             out["until"] = max(out["until"] or 0, reset or now + 3600)
-    if (snapshot or {}).get("status") == "rejected" and not out["exhausted"]:
-        rs = [w.get("reset") for w in out["windows"].values() if w.get("reset") and w["reset"] > now]
-        if rs or not out["windows"]:
+    # A "rejected" answer blocks only the window(s) that themselves said rejected; the overall status alone is trusted only when the
+    # snapshot knows no windows. Otherwise a 5 h window that already reset would keep the plan "exhausted" until the 7 d reset, and
+    # since nothing is sent to Anthropic while exhausted the snapshot would never refresh (incident 2026-11-02, docs/INCIDENTS.md).
+    if not out["exhausted"]:
+        blocked = [w.get("reset") for name, w in out["windows"].items()
+                   if (wins.get(name) or {}).get("status") == "rejected" and w.get("reset") and w["reset"] > now]
+        if blocked:
+            out["exhausted"], out["until"] = True, max(blocked)
+        elif (snapshot or {}).get("status") == "rejected" and not any((wins.get(n) or {}).get("status") for n in out["windows"]):
+            rs = [w.get("reset") for w in out["windows"].values() if w.get("reset") and w["reset"] > now]
             out["exhausted"], out["until"] = True, (min(rs) if rs else now + 3600)
     if lams:
         out["known"] = True

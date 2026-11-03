@@ -10,12 +10,26 @@ Claude Code ──► 127.0.0.1:4001 gateway ──► api.anthropic.com   (pass
                     └─ answers itself: "Claude plan is out" question, resume confirmation
 ```
 
+**Two modes** (`mode` in the config; `node ar.mjs mode shadow|route`):
+- `shadow` (the default of the repository): the gateway decides and logs what it WOULD do, and sends every request exactly as Claude Code
+  made it. Nothing changes for the person; `node ar.mjs report` shows what routing would have changed and saved.
+- `route`: the request goes to the chosen model and effort.
+
+**Gemini is not a conversation model here.** The `auto` choice is between Haiku, Sonnet and Opus (and their effort). Gemini serves the
+classifier and the tools the Claude calls (`node ar.mjs gemini ...`, see `docs/TOKEN-SAVING.md`), because translating a Claude Code
+conversation to another vendor loses thinking, server tools and the prompt cache (`docs/INCIDENTS.md`). A model takes the main loop only
+if its `roles` in the config include `main`.
+
 Light and local: Python 3.9+ standard library plus PyYAML, in its own venv (`~/.auto-router/venv`), about 35 MB of RAM. No Docker.
 The only outbound connections are to the providers you enabled.
 
 ## The decision rule
 Decided with the owner on 2026-11-02, in this order:
 
+0. **A floor for the agent's main loop** (`quality.main_floor`, 3): a one-line question still arrives with the agent's whole toolbox and
+   system prompt, so the main loop never asks for less. A reply that only continues the work ("continue", "yes", "did it hang?",
+   your words in `patterns.continue_extra`) inherits the rating of the work in progress instead of being rated on its own, and so does a
+   request that arrives far smaller than its session's peak (the client lost its history).
 1. **Adequacy first.**
    - The task analysis gives:
      - `task`;
@@ -81,6 +95,25 @@ errors or a loop) the remaining work is re-analysed:
 - `!opus`, `!sonnet`, `!haiku`, `!pro`, `!flash` and `!lite` in a message pin that prompt.
 - `!esperar` is option 3 at any time.
 
+## The umbrella: switch everything, or one part
+```sh
+node ar.mjs on | off              # all of it / none of it. off ALWAYS returns Claude Code to Anthropic directly
+node ar.mjs feature list          # what each part is, wanted vs installed
+node ar.mjs feature token_hooks off
+node ar.mjs status                # gateway, mode, model and effort in use per session, plan, features
+node ar.mjs mode route            # shadow | route
+node ar.mjs report --since 24h    # what routing chose against what Claude Code asked, estimated saving, cache hit, context drops
+```
+Wanted state: `gateway/features.defaults.json` (everything off, committed) overlaid by `config/local/features.json` (yours). Parts:
+`gateway`, `claude_code`, `gemini_tools`, `token_hooks`, `haiku_subagents`, `compact_instructions`, `terse_style`, `statusline`,
+`vscode_status`, `resume_on_reset`, `notifications`, `legacy_stack`. Everything installed under `~/.claude` is recognisable as ours and
+removing a part touches nothing else (your hooks, permissions, status line, CLAUDE.md text stay). Do not switch the gateway off from a
+session that goes through it: that cuts the session itself (`off` refuses unless `--force`).
+
+**Which model is answering?** `sonnet (medium)`: the status line (`statusline`) and the VS Code status bar (`vscode_status`) show the model
+and effort actually sent, and in shadow mode also `auto: haiku (low)`. The answer's own model label is the real model, never a Claude name
+for a non-Claude model.
+
 ## Commands
 ```sh
 node ar.mjs gateway install      # venv + login service (LaunchAgent on macOS, systemd --user on Linux); restarts on failure
@@ -105,7 +138,11 @@ git-ignored; it is merged over the defaults key by key. The main keys:
 | Key | What |
 |---|---|
 | `models` | candidates: `upstream` (anthropic / gemini), provider `id`, funding `source`, `enabled` |
-| `auto_model` | requests for this model are routed (keep Claude Code's start model = `sonnet`) |
+| `mode` | `shadow` or `route` |
+| `auto_model` | requests for this model are routed (keep Claude Code's start model = `sonnet`; `claude-code off` gives your earlier model back) |
+| `gemini_tasks` | what each `node ar.mjs gemini <task>` uses (model, purpose) |
+| `patterns` | your language's continuation and complaint words (`continue_extra`, `complaint_extra`) |
+| `messages` | every text the person reads (the plan-is-out question, notifications, the resume prompt): set your language here |
 | `quality`, `adequacy`, `tie` | the weights of the rule above; per-model `adequacy_bias` in models.yaml holds the owner's experience |
 | `funding.claude` | `allow_overage` (automatic paid extra usage, default false), `overage: never|ask` |
 | `funding.google` | `currency`, `lots` (remaining, end date: from Cloud Console → Billing → Credits), `prepaid`, `allow_payg`, `horizon_days` |
@@ -125,8 +162,10 @@ are estimates until calibrated; the outcome history corrects them per project ov
 - Logs never hold prompt text or credentials.
 
 ## Known limits
+- Switching models mid-conversation breaks the prompt cache of the model left. The cost model counts that (a warm model reads its
+  context at the cached rate); whether a change of `effort` alone keeps the cache is to be confirmed with the cache-hit line of `report`.
 - The project card and index (`.auto-router/project.md`, PLAN 2C) are read when present but not generated yet.
 - Credit lots are entered by hand from the console export. New monthly lots must be added to `config/local/gateway.yaml`.
-- Gemini serving Claude Code is not supported by Anthropic. It is translated by `translate_openai.py`, and thinking blocks and server
-  tools are dropped on that route.
+- Gemini serving Claude Code is not supported by Anthropic. `translate_openai.py` keeps it working for an explicit choice (a model with
+  the `main` role), but thinking blocks, server tools, documents and `tool_reference` blocks are dropped or reduced to text on that route.
 - Windows: no login service yet.

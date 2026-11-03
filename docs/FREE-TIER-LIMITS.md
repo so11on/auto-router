@@ -178,3 +178,10 @@ Ollama nemotron-3-super, OpenRouter nemotron-3-ultra / north-mini-code / laguna-
 After replacing the credentials with a Workers-AI-scoped token (see docs/GET-KEYS.md), `node ar.mjs omniroute` discovered and verified these models with real requests; they are in both pool combos:
 `@cf/meta/llama-3.3-70b-instruct-fp8-fast`, `@cf/zai-org/glm-4.7-flash`, `@cf/google/gemma-4-26b-a4b-it`, `@cf/qwen/qwen2.5-coder-32b-instruct`.
 Published free allowance: about 10,000 "neurons" per day shared by all models (from OmniRoute's documentation, not measured by us). Going over fails the request rather than billing.
+
+## Gemini tools (`gateway/gemini_cli.py`), measured 2026-11-03
+| Call | Model | Result |
+|---|---|---|
+| `digest` of a 9 KB file | `gemini-3.8-flash` | works; about 2250 tokens in, 78 out, about US$ 0.002 at the prices in `litellm/models.yaml` |
+| `research` (Google Search grounding) | `gemini-3.8-flash` | works; sources come back as redirect links; the answer can be out of date, so verify what you act on |
+| `batch submit` / `collect` (2 jobs) | `gemini-3.5-flash-lite` | works through `models/<id>:batchGenerateContent`; finished within a minute for 2 tiny jobs (the documented limit is 24 h) |

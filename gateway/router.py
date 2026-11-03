@@ -1,4 +1,4 @@
-"""`auto` for Claude Code: which model answers each request, with which effort (docs/GATEWAY.md, docs/PLAN-v0.6.md).
+"""`auto` for Claude Code: which model answers each request, with which effort (docs/GATEWAY.md, docs/ROADMAP.md).
 
 The rule, in this order (decided with the owner, 2026-11-02):
   1. ADEQUACY FIRST. The task analysis says what the task requires (complexity, reasoning depth, uncertainty, risk, project
@@ -41,11 +41,29 @@ import funding  # noqa: E402
 
 LOCAL_CONFIG = os.environ.get("AR_GATEWAY_CONFIG", os.path.join(ROOT, "config", "local", "gateway.yaml"))
 ROUTING_FILE = os.environ.get("AR_ROUTING_FILE", os.path.join(ROOT, "litellm", "routing.yaml"))
+FEATURE_FILES = (os.path.join(HERE, "features.defaults.json"),
+                 os.environ.get("AR_FEATURES_FILE", os.path.join(ROOT, "config", "local", "features.json")))
 STATE_TTL = 6 * 3600
 EFFORTS = ("low", "medium", "high")
 TEXT_PINS = {"opus": "claude-opus-cli", "sonnet": "claude-sonnet-cli", "haiku": "claude-haiku-cli", "gemini": "gemini-argon",
              "argon": "gemini-argon", "pro": "gemini-pro", "flash": "gemini-flash", "lite": "gemini-flash-lite"}
 PIN_RE = re.compile(r"(?:^|\s)!(opus|sonnet|haiku|gemini|argon|pro|flash|lite|esperar|wait)\b", re.I)
+# A reply that only continues the previous work ("continue", "yes", "did it hang?"): it says nothing about difficulty, so it inherits
+# the analysis of the work in progress instead of being rated on its own (incident 2026-11-02: these were rated qa/1).
+CONTINUE_WORDS = ["continue", "go on", "go", "yes", "yep", "y", "ok", "okay", "sure", "do it", "proceed", "retry", "try again", "hung", "stuck",
+                  "done", "finished", "and now", "[1-4]"]
+COMPLAINT_WORDS = ["did(n.?t| not) work", "doesn.?t work", "still (broken|failing|wrong|not)", "wrong", "that.?s not", "try again", "broken"]
+# More words (your language) go in `patterns.continue_extra` / `patterns.complaint_extra` of the config.
+
+
+def compile_patterns(cfg: dict):
+    extra = cfg.get("patterns") or {}
+    cont = "|".join(CONTINUE_WORDS + [w for w in extra.get("continue_extra") or []])
+    comp = "|".join(COMPLAINT_WORDS + [w for w in extra.get("complaint_extra") or []])
+    return (re.compile(r"^\s*(" + cont + r")\b[^\n]{0,30}$", re.I), re.compile("(" + comp + ")", re.I))
+
+
+MAIN_ROLE = "main"
 CWD_RE = re.compile(r"(?:Primary working directory|Working directory|cwd):\s*(/[^\n<]+)")
 OUT_TOKENS = engine.OUTPUT_TOKENS
 
@@ -103,6 +121,15 @@ def last_prompt(messages: list) -> str:
     return ""
 
 
+def last_assistant_text(messages: list) -> str:
+    for m in reversed(messages or []):
+        if m.get("role") == "assistant":
+            t = " ".join(b.get("text", "") for b in _blocks(m.get("content")) if b.get("type") == "text").strip()
+            if t:
+                return t
+    return ""
+
+
 def first_prompt(messages: list) -> str:
     for m in messages or []:
         if m.get("role") == "user":
@@ -122,9 +149,18 @@ def est_tokens(req: dict) -> int:
 
 
 def working_dir(req: dict):
+    """The folder Claude Code works in: announced in the system prompt or, in newer versions, in a block of the first user turn."""
     sysp = req.get("system")
     text = sysp if isinstance(sysp, str) else "\n".join(b.get("text", "") for b in sysp or [] if isinstance(b, dict))
     m = CWD_RE.search(text)
+    if not m:
+        for msg in (req.get("messages") or [])[:2]:
+            for b in _blocks(msg.get("content")):
+                m = CWD_RE.search(b.get("text", "")) if b.get("type") == "text" else None
+                if m:
+                    break
+            if m:
+                break
     return m.group(1).strip() if m else None
 
 
@@ -170,7 +206,8 @@ class Outcomes:
 
     @staticmethod
     def _keys(proj, task, band, model):
-        return [f"{proj}|{task}|{band}|{model}", f"*|{task}|{band}|{model}"]
+        keys = [f"{proj}|{task}|{band}|{model}", f"*|{task}|{band}|{model}"]
+        return keys[:1] if proj == "*" else keys  # no project known: one key, or every outcome is counted twice
 
     def record(self, proj, task, band, model, ok: bool):
         for k in self._keys(proj, task, band, model):
@@ -210,6 +247,37 @@ class Router:
         self.sessions = {}
         self.claude_snapshot = {}
         self.resume_queue = []
+        self.continue_re, self.complaint_re = compile_patterns(self.cfg)
+        self.features = None  # tests set a dict; otherwise the feature files are read (and re-read when they change)
+        self._feature_cache = (None, {})
+
+    def feature(self, name: str) -> bool:
+        """Is this umbrella feature wanted? (`node ar.mjs feature <name> on|off`; takes effect without restarting the gateway.)"""
+        if self.features is not None:
+            return bool(self.features.get(name))
+        stamp = tuple((os.path.getmtime(f) if os.path.exists(f) else 0) for f in FEATURE_FILES)
+        if self._feature_cache[0] != stamp:
+            merged = {}
+            for f in FEATURE_FILES:
+                try:
+                    with open(f) as fh:
+                        merged.update((json.load(fh) or {}).get("features") or {})
+                except (OSError, ValueError):
+                    pass
+            self._feature_cache = (stamp, merged)
+        return bool(self._feature_cache[1].get(name))
+
+    def msg(self, key: str, **kw) -> str:
+        """User-facing text from `messages:` in the config (language and wording are the user's choice)."""
+        text = (self.cfg.get("messages") or {}).get(key) or key
+        try:
+            return text.format(**kw)
+        except (KeyError, IndexError, ValueError):
+            return text
+
+    @property
+    def mode(self) -> str:
+        return "route" if str(self.cfg.get("mode", "shadow")).lower() == "route" else "shadow"
 
     # ---------- state
     def _session(self, key: str) -> dict:
@@ -242,8 +310,9 @@ class Router:
                                     f.get("rates") or {}, base)
 
     # ---------- requirement and adequacy
-    def requirement(self, a: dict, crit: str, failing: bool) -> float:
-        """How good a model must be for this task, on the 0-5 fit scale."""
+    def requirement(self, a: dict, crit: str, failing: bool, main: bool = False) -> float:
+        """How good a model must be for this task, on the 0-5 fit scale. The main loop of the agent never asks for less than
+        `quality.main_floor`: a one-line question still arrives with the agent's whole toolbox and system prompt."""
         q = self.cfg.get("quality") or {}
         c = engine.adjust_complexity(a.get("task", "qa"), a.get("complexity", 2), False, self.routing)
         r = float(c) + float((q.get("criticality_offset") or {}).get(crit, 0))
@@ -256,6 +325,8 @@ class Router:
             r += float(q.get("uncertainty_margin", 1.0)) * (unc - floor_u) / (1.0 - floor_u)
         if failing:
             r += float(q.get("failure_step", 1.0))
+        if main:
+            r = max(r, float(q.get("main_floor", 0)))
         return max(1.0, min(5.0, r))
 
     def adequacy(self, name: str, a: dict, need: dict, proj: str) -> tuple:
@@ -310,14 +381,19 @@ class Router:
         out = OUT_TOKENS.get(task, 2000) * float(spec.get("verbosity", 1.0)) * (2 if need.get("long_output") else 1)
         return (need["ctx"] * pin + out * pr[1]) / 1e6
 
-    def candidates(self, a: dict, required: float, need: dict, sess: dict, proj: str) -> tuple:
-        """Every allowed model with adequacy, cost and availability. -> (rows, rejected)"""
+    def candidates(self, a: dict, required: float, need: dict, sess: dict, proj: str, role: str = MAIN_ROLE) -> tuple:
+        """Every allowed model with adequacy, cost and availability. -> (rows, rejected)
+        A model takes the main loop only if its `roles` (config) include it: Gemini is listed for the classifier and for tools the
+        Claude calls, never for the conversation (its translation loses thinking, server tools and the cache)."""
         ttl = float((self.cfg.get("switching") or {}).get("cache_ttl_s", 300))
         task = a.get("task", "qa")
         rows, rejected, states = [], {}, {}
         for name, m in (self.cfg.get("models") or {}).items():
             if not self._available(name, m):
                 rejected[name] = "unavailable"
+                continue
+            if role not in (m.get("roles") or [MAIN_ROLE, "auxiliary"]):
+                rejected[name] = "role"
                 continue
             if not safety.allowed_by_safety(name, self.settings):  # safety is a hard filter, before anything else
                 rejected[name] = "safety"
@@ -399,6 +475,12 @@ class Router:
         crit = pol.get("criticality", "normal")
         need = {"tools": bool(req.get("tools")), "vision": has_image(messages), "ctx": est_tokens(req),
                 "confidential": bool(pol.get("confidential"))}
+        # A main request far smaller than the session's peak without a compaction means the client lost the history. Never rate it
+        # as a fresh trivial question: it inherits the work in progress (incident 2026-11-02).
+        peak = sess.get("peak_ctx", 0)
+        ctx_drop = rclass == "main" and peak > 20000 and need["ctx"] < 0.1 * peak
+        sess["peak_ctx"] = max(need["ctx"], peak) if not ctx_drop else peak
+        sess["ctx_drop"] = ctx_drop
         new_prompt = prompt_id != sess.get("prompt_id") if prompt_id else policy.signals_anthropic(messages)["steps"] == 0
         pin_match = PIN_RE.search(text or "") if new_prompt else None
         sw = dict(policy.DEFAULT_SWITCHING)
@@ -412,7 +494,7 @@ class Router:
             sess.update(prompt_id=prompt_id, model=by_id[requested])
             return self._finish(sess, by_id[requested], None, "picker pin", {"task": "pinned"}, 0, keep_effort=True)
         if new_prompt:
-            self._close_prompt(sess, proj)
+            self._close_prompt(sess, proj, complaint=bool(self.complaint_re.search(text or "")))
             sess["prompt_id"] = prompt_id
             choice = (text or "").strip().lower()
             pend = sess.get("pending") or {}
@@ -436,12 +518,25 @@ class Router:
                 if name in models and self._available(name, models[name]) and not self._unusable(name) and \
                         safety.allowed_by_safety(name, self.settings) and \
                         (not sess.get("sensitive") or safety.allowed_for_sensitive(name, self.settings)):
+                    rank = lambda n: 3 if "opus" in (n or "") else 2 if "sonnet" in (n or "") else 1 if "haiku" in (n or "") else 0  # noqa: E731
+                    prev_model, prev_a = sess.get("model"), sess.get("a")
+                    if prev_model and prev_a and rank(name) > rank(prev_model) > 0 and not sess.get("pin"):  # moved up by hand
+                        self.outcomes.record(proj, prev_a.get("task", "qa"), engine.band_of(int(prev_a.get("complexity", 2))), prev_model, False)
+                        sess["failed_recorded"] = True
                     sess.update(pin=name)
                     return self._finish(sess, name, None, f"text pin !{pin_match.group(1)}", {"task": "pinned"}, 0)
             sess.pop("pin", None)
+            prev = sess.get("a") if (sess.get("a") or {}).get("task") not in (None, "pinned") else None
             card = project_card(cwd)
-            a = self.classify((text or first_prompt(messages)) + (f"\n\n[Project]\n{card}" if card else ""), checkpoint=False,
-                              sensitive=sess.get("sensitive", False))
+            context = ""
+            if prev:  # what the work in progress is, so a short reply is rated against it
+                context = (f"\n\n[Work in progress] task={prev.get('task')}, complexity={prev.get('complexity')}. "
+                           f"Last answer: {last_assistant_text(messages)[:400]}")
+            if prev and (self.continue_re.match(text or "") or ctx_drop):
+                a = dict(prev, source="inherited")  # "continue", "yes", "did it hang?": nothing new about the difficulty
+            else:
+                a = self.classify((text or first_prompt(messages)) + context + (f"\n\n[Project]\n{card}" if card else ""),
+                                  checkpoint=False, sensitive=sess.get("sensitive", False))
             sess.update(a=a, task=a["task"], last_eval_step=0, steps_since_switch=0, down_votes=0, steps=0, switch_step=0,
                         failed=False, proj=proj)
             failing = False
@@ -463,14 +558,19 @@ class Router:
                 if sess.get("model"):  # the model in use could not do it: an outcome to learn from
                     self.outcomes.record(proj, a.get("task", "qa"), engine.band_of(int(a.get("complexity", 2))), sess["model"], False)
             else:
+                prev = sess.get("a") or a
                 a = dict(self.classify(self._checkpoint_text(messages), checkpoint=True, sensitive=sess.get("sensitive", False)))
-                a["task"] = a.get("task") or sess.get("task", "qa")
+                if a.get("task") != "mechanical":  # inside one prompt the task and its difficulty only go up; only "the plan is
+                    a["task"] = prev.get("task", "qa")  # decided, edits remain" (mechanical) lowers the bar
+                    for k in ("complexity", "reasoning_depth", "tool_intensity"):
+                        a[k] = max(a.get(k, 0), prev.get(k, 0))
+                    a["risk"] = bool(a.get("risk") or prev.get("risk"))
                 sess["a"] = a
 
         if sess.get("hold") and sess.get("hold_until", 0) > self.clock() and new_prompt:
             return self._finish(sess, sess["hold"], None, "chosen while Claude is out", a, sess.get("req", 0))
-        required = self.requirement(a, crit, failing)
-        rows, rejected = self.candidates(a, required, need, sess, proj)
+        required = self.requirement(a, crit, failing, main=(rclass == "main"))
+        rows, rejected = self.candidates(a, required, need, sess, proj, role=MAIN_ROLE)
         pick = self.choose(rows)
         cur = sess.get("model")
 
@@ -513,12 +613,24 @@ class Router:
         m = (self.cfg.get("models") or {}).get(name) or {}
         return bool(self.source_state(m.get("source", "claude")).get("exhausted"))
 
-    def _close_prompt(self, sess: dict, proj: str):
-        """A new prompt means the previous one ended; if its model was never escalated away, count a success."""
+    def _close_prompt(self, sess: dict, proj: str, complaint: bool = False):
+        """A new prompt means the previous one ended. Success if the model was never escalated away AND the person did not come back
+        complaining (a bad answer followed by "it hung" used to count as a success and made the weak model look better)."""
         a = sess.get("a")
-        if a and sess.get("model") and not sess.get("failed") and not sess.get("pin") and a.get("task") != "pinned":
+        if a and sess.get("model") and not sess.get("pin") and a.get("task") != "pinned" and not sess.get("failed_recorded"):
             self.outcomes.record(sess.get("proj", proj), a.get("task", "qa"), engine.band_of(int(a.get("complexity", 2))),
-                                 sess["model"], True)
+                                 sess["model"], not sess.get("failed") and not complaint)
+        sess["failed_recorded"] = False
+
+    def note_failure(self, sid: str):
+        """The upstream refused or broke on this session's request (4xx/5xx): the model in use failed this task."""
+        sess = self.sessions.get(sid)
+        a = (sess or {}).get("a")
+        if sess and a and sess.get("model") and not sess.get("failed"):
+            sess["failed"] = True
+            self.outcomes.record(sess.get("proj", "*"), a.get("task", "qa"), engine.band_of(int(a.get("complexity", 2))),
+                                 sess["model"], False)
+            sess["failed_recorded"] = True
 
     def _sensitivity(self, sess: dict, messages: list):
         if self.settings.get("sensitive_guard") != "on":
@@ -544,7 +656,7 @@ class Router:
                     c = b.get("content")
                     t = c if isinstance(c, str) else json.dumps(c, ensure_ascii=False)
                     lines.append(("tool_error: " if b.get("is_error") else "tool_result: ") + t[:300])
-        return f"Original request:\n{first_prompt(messages)[:1500]}\n\nLatest steps:\n" + "\n".join(lines)[-4000:]
+        return f"Current request:\n{(last_prompt(messages) or first_prompt(messages))[:1500]}\n\nLatest steps:\n" + "\n".join(lines)[-4000:]
 
     def _simple(self, name: str, rclass: str) -> dict:
         """Auxiliary requests (titles, summaries) and the Explore subagent: a fixed small model; if its source is out, the cheapest
@@ -552,7 +664,7 @@ class Router:
         models = self.cfg.get("models") or {}
         if self._unusable(name) or not self._available(name, models.get(name) or {}):
             alt = [n for n, m in models.items() if self._available(n, m) and not self._unusable(n)
-                   and safety.allowed_by_safety(n, self.settings)]
+                   and "auxiliary" in (m.get("roles") or [MAIN_ROLE, "auxiliary"]) and safety.allowed_by_safety(n, self.settings)]
             if alt:
                 now = datetime.fromtimestamp(self.clock(), timezone.utc)
                 name = min(alt, key=lambda n: engine.price_for(registry.spec(n), 0, now) or (0, 0))
@@ -592,16 +704,16 @@ class Router:
         g = usable[0] if usable else None
         overage = self._overage_option(claude, claude_model)
         sess["pending"] = {"a": a, "req": required, "suggest": g and g["name"], "overage": overage}
-        lines = [f"⏸ A cota do Claude acabou até **{when_txt}**, e o modelo adequado para esta tarefa ({a.get('task')}, "
-                 f"complexidade {a.get('complexity')}) é do Claude ({claude_model or 'Claude'}). Responda com o número:", ""]
+        lines = [self.msg("ask_header", when=when_txt, task=a.get("task"), complexity=a.get("complexity"), model=claude_model or "Claude"), ""]
         if g:
             left = self.source_state(g["source"]).get("remaining_usd")
-            lines.append(f"- **1** — usar agora o **{g['name']}**, o melhor disponível (adequação {g['adequacy']:.1f} para um requisito "
-                         f"de {required:.1f}; ≈ US$ {g['cost']:.2f}" + (f"; crédito restante ≈ US$ {left:.2f}" if left is not None else "") + ")")
+            lines.append(self.msg("ask_option_best", model=g["name"], adequacy=g["adequacy"], required=required, cost=g["cost"],
+                                  left=self.msg("ask_left", left=left) if left is not None else ""))
         if overage:
-            lines.append(f"- **2** — usar os **créditos do Claude** (uso extra pago, sua reserva de emergência) com o {overage}")
-        lines.append(f"- **3** — esperar a cota reiniciar ({when_txt}): retomo esta sessão sozinho e aviso com uma notificação")
-        lines.append(f"- **4** — parar aqui: aviso quando a cota voltar e você manda continuar quando quiser")
+            lines.append(self.msg("ask_option_overage", model=overage))
+        if self.feature("resume_on_reset"):
+            lines.append(self.msg("ask_option_wait", when=when_txt))
+        lines.append(self.msg("ask_option_stop"))
         return {"action": "answer", "reason": "Claude plan exhausted: asked", "text": "\n".join(lines), "status": 200,
                 "task": a.get("task"), "complexity": a.get("complexity")}
 
@@ -614,19 +726,17 @@ class Router:
         ex = self.cfg.get("on_claude_exhausted") or {}
         until = (claude.get("until") or self.clock() + 3600) + float(ex.get("resume_margin_s", 120))
         when = datetime.fromtimestamp(until).strftime("%d/%m %H:%M")
-        if auto and (not ex.get("resume", True) or not cwd or sid == "nosession"):
+        if auto and (not ex.get("resume", True) or not self.feature("resume_on_reset") or not cwd or sid == "nosession"):
             auto = False  # cannot resume this session by itself: fall back to a notification
         self.resume_queue = [r for r in self.resume_queue if r["session"] != sid]
         self.resume_queue.append({"session": sid, "cwd": cwd, "at": until, "queued": self.clock(), "mode": "resume" if auto else "notify"})
         if auto:
             return {"action": "answer", "reason": "resume queued", "status": 200, "resume": self.resume_queue[-1],
-                    "text": f"⏸ Combinado. Retomo esta sessão sozinho por volta de **{when}**, quando a cota do Claude voltar, "
-                            "e aviso com uma notificação. Ao reabrir a sessão você vê o que foi feito."}
+                    "text": self.msg("resume_auto", when=when)}
         return {"action": "answer", "reason": "stopped: notify only", "status": 200, "resume": self.resume_queue[-1],
-                "text": f"⏹ Parado. Aviso com uma notificação quando a cota do Claude voltar (por volta de **{when}**); "
-                        "aí é só mandar continuar."}
+                "text": self.msg("resume_notify", when=when)}
 
     def _no_model_text(self, rejected: dict, rows: list) -> str:
         why = ", ".join(f"{k}: {v}" for k, v in sorted(rejected.items()))
         out = ", ".join(r["name"] for r in rows if not r["usable"])
-        return "Nenhum modelo pode atender este pedido agora (" + "; ".join(x for x in (why, out and f"sem cota: {out}") if x) + ")."
+        return self.msg("no_model", reasons="; ".join(x for x in (why, out and f"out of quota: {out}") if x))
