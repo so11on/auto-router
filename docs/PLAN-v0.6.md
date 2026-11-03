@@ -305,11 +305,17 @@ Acrescentada em 2026-11-02 a pedido do dono. Pesquisa e fontes em `docs/DECISION
 7. **Retorno ao Claude Code:** se você ativar, ao terminar o gateway retoma a sessão (mesmo mecanismo da Fase 3, `claude --resume`) com "os resultados do lote X estão em …; integre". Senão, só a notificação.
 8. **Custo:** a estimativa (tokens × preço × 0,5) aparece antes de enviar e pede confirmação acima de `batch.confirm_above_usd` (padrão US$ 2). O gasto entra no mesmo livro por fonte, que alimenta o equilíbrio de cotas.
 
-**Pontos de entrada:**
-- **CLI:** `node ar.mjs batch submit|status|results|cancel`.
-- **Servidor MCP local** (stdio, sem rede) com `batch_submit`, `batch_status` e `batch_results`. Assim, quando você diz "revise todos os módulos em lote", o próprio Claude Code monta os itens e envia. O `ar.mjs claude-code on` pergunta antes de instalá-lo.
-- **`/lote`:** uma skill que orienta o modelo a usá-lo.
-- **Gateway:** opção **5** na pergunta de cota esgotada, "enviar como lote (50% mais barato, resposta em até algumas horas)", só quando a tarefa é de uma rodada.
+**Como o lote chega ao roteador (decidido pelo dono em 2026-11-02: automático):**
+- O roteador detecta trabalho adiável e de uma rodada e **oferece** o lote como pergunta, sempre antes de gastar. Só pergunta quando a economia estimada passa de `batch.offer_above_usd` (padrão US$ 0,50), para não incomodar. Exemplo: "Isto é adiável e de uma rodada (38 arquivos). 1: normal agora (≈ US$ 3,10). 2: lote no Gemini Argon, 50% mais barato (≈ US$ 1,55), resultado em até algumas horas. 3: lote no Claude, se houver saldo de API." `!agora` e `!lote` forçam a escolha.
+- Ao aceitar, o gateway responde com uma chamada de ferramenta (`tool_use`) ao servidor MCP local `auto-router-batch`, que o `ar.mjs claude-code on` instala com a sua permissão. Esse servidor monta os itens dentro da pasta do projeto (só leitura, só a pasta atual), estima o custo e envia o piloto. O Claude Code executa a ferramenta, e a resposta seguinte (um modelo pequeno) conta o que foi enviado. **Precisa de um spike:** confirmar que o Claude Code aceita um turno de assistente sintetizado pelo gateway com `tool_use`.
+- O mesmo servidor e a CLI `node ar.mjs batch submit|status|results|cancel` existem como encanamento e para scripts, mas a entrada normal é o roteador.
+- Na pergunta de cota esgotada, a opção **5** (lote) segue a mesma regra.
+
+**A verificar antes de implementar:**
+- **Carteira de lotes:** a API de lotes é produto do Console (chave de API, saldo do Console). Os "créditos de uso" da assinatura (antigo uso extra, cobrados a preço de API) vêm de outra carteira (claude.ai, Configurações, Uso); a documentação trata Claude Code e Console como sistemas separados. Confirmar em qual tela o dono recarrega os R$ 20.
+- **Gemini 4 Argon em lote:** confirmar com uma chamada real de poucos centavos que o modelo aceita o modo de lote.
+- **Espera automática nativa do Claude Code:** a documentação (code.claude.com/docs/en/costs) diz que, desde a v2.1.234, o próprio Claude Code pode esperar a cota reiniciar e continuar a tarefa (`/rate-limit-options`, `autoContinueAtUsageLimit`). Como o gateway responde no lugar do 429, essa espera nativa não dispararia. Verificar se vale reaproveitá-la na opção 3 da Fase 3 em vez do `claude -p --resume`.
+- **Cobrança do `claude -p`:** fontes terceiras afirmam que o uso programático (`-p`, Agent SDK) passou a sair de um pool de créditos separado desde 15/06/2026. Não confirmado na documentação oficial; afeta a retomada automática. Medir numa chamada real.
 
 **O que reduz tokens também no modo interativo (sem lote):**
 - O cache de prompt, que já é preservado porque o gateway não reescreve o corpo e só troca de modelo quando compensa.
@@ -324,7 +330,7 @@ Acrescentada em 2026-11-02 a pedido do dono. Pesquisa e fontes em `docs/DECISION
 - **B3:** trabalhos internos em lote (cartão do projeto, índice, calibração dos `fit`).
 - **B4:** a opção 5 e a regra "lote contra síncrono" dentro do roteador.
 
-**Depende de você:** uma chave de API do Console com saldo (a da Anthropic) e a do Gemini com crédito. Sem a chave da Anthropic, só o Gemini faz lote.
+**Depende de você:** o lote Gemini usa a chave e os créditos que você já tem. O lote Anthropic precisa de saldo na API do Console (ver "A verificar"); sem ele, só o Gemini faz lote.
 
 ## Fase 3: cota do Claude esgotada (pergunta, Gemini ou esperar)
 O recurso é **opcional**. O instalador pergunta: "Ativar a pergunta Gemini/esperar e a retomada automática?". Na sua configuração fica ligado.

@@ -182,7 +182,10 @@ Gemini Batch Mode 50 % off, 24 h target / 48 h expiry, OpenAI-compatible endpoin
 Consequences: batches are asynchronous and cannot run tools, so they do not fit the interactive agent loop; the discount is on API
 money (Gemini credits, Console balance, Claude extra usage), not on subscription tokens, which have no per-token price. They fit
 single-round deferrable work, the router's own background jobs (project cards, `fit` calibration) and the "plan is out" case. Sources:
-platform.claude.com/docs/en/build-with-claude/batch-processing; developers.googleblog.com (Batch Mode in the Gemini API; Batch API
+Owner chose the automatic path (the router detects deferrable work and offers a batch, always asking before spending).
+Also found: Claude Code >= 2.1.234 can itself wait for a usage-limit reset and continue (`/rate-limit-options`,
+`autoContinueAtUsageLimit`), and a third-party claim that `claude -p` usage moved to a separate credit pool on 2026-06-15 (unverified).
+Sources: code.claude.com/docs/en/costs; platform.claude.com/docs/en/build-with-claude/batch-processing; developers.googleblog.com (Batch Mode in the Gemini API; Batch API
 with embeddings and OpenAI compatibility).
 
 ## Open items
