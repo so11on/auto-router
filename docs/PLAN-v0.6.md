@@ -238,6 +238,94 @@ Na primeira vez que um projeto é usado (o `cwd` é detectado), o roteador gera 
   O `ar.mjs project apply` mostra o diff e aplica só o que você aprovar.
 - **Privacidade:** a pasta não vai para o git do projeto. O roteador adiciona `.auto-router/` em `.git/info/exclude`, local e sem alterar o `.gitignore`, a menos que você escolha versioná-la.
 
+## Fase 2D: lotes (batch): onde economizam de verdade e como o auto-router os usa
+Acrescentada em 2026-11-02 a pedido do dono. Pesquisa e fontes em `docs/DECISIONS.md`.
+
+**O que a documentação oficial diz (lida em 2026-11-02):**
+- **Anthropic, Message Batches API:**
+  - **50% de desconto** sobre o preço da API, em todos os modelos ativos (Haiku, Sonnet e Opus 5.5 inclusos).
+  - Até **100.000 pedidos ou 256 MB** por lote.
+  - A maioria termina em **menos de 1 h**; o lote expira em **24 h** (pedido expirado ou cancelado não é cobrado).
+  - Resultados ficam **29 dias**.
+  - Aceita ferramentas, raciocínio estendido, visão, system e multi-turno. Não aceita `stream`, `speed`, `fallbacks` nem `max_tokens: 0`.
+  - O cache de prompt **acumula** com o desconto, mas só "por melhor esforço"; a documentação recomenda o cache de **1 hora**.
+  - **Não é elegível a retenção zero (ZDR).**
+  - O lote pode passar um pouco do limite de gasto do Workspace.
+  - A autenticação documentada é só a chave de API (`x-api-key`), do Console, cobrada à parte.
+- **Gemini, Batch Mode:**
+  - **50% de desconto**, alvo de 24 h; o job expira se ficar mais de 48 h.
+  - Entrada inline abaixo de 20 MB ou arquivo de até 2 GB (fonte secundária, a verificar).
+  - O cache **não** acumula com o desconto.
+  - Aceita o endpoint compatível com OpenAI (`completion_window="24h"`).
+
+**Limites que mudam o desenho (sem eles o plano prometeria o que não existe):**
+1. **Lote é assíncrono e não executa ferramentas.** Serve a trabalho de **uma rodada** cujo contexto já está montado: revisar, resumir, gerar, classificar, traduzir, analisar. Não serve ao loop do agente (ler → editar → testar → corrigir), em que cada passo depende do anterior e você está esperando.
+2. **O desconto é sobre a API.** O tráfego da assinatura não tem preço por token, então lote não o reduz, e a assinatura não cobre a API de lotes (a documentação só mostra chave de API). Lote economiza **crédito do Gemini, saldo da API Anthropic ou uso extra pago**, e pode poupar cota do plano quando ela está apertada.
+3. **Conteúdo sensível não vai em lote por padrão** (`batch.allow_sensitive: false`): a Anthropic guarda 29 dias e o lote não é elegível a ZDR.
+
+**Onde paga:**
+- **Seu trabalho em massa e adiável:** "revise todos os módulos", "gere testes para cada função", "documente cada arquivo", "traduza estes N textos".
+- **Trabalho interno do próprio auto-router**, que é sempre adiável:
+  - cartão e índice do projeto (2C);
+  - resumos de memória;
+  - **calibração dos `fit`**, que está pendente: rodar N tarefas reais em cada modelo, a metade do preço.
+- **Cota do Claude esgotada e tarefa adiável:** o lote é a opção mais barata (50% do preço de API, contra 100% do uso extra).
+
+**Como o auto-router decide (lote é um modo de entrega, não um modelo):**
+- Vale a mesma regra de sempre: adequação primeiro, o mais barato entre os adequados, saldo só desempata. O lote entra como candidato extra de **entrega**: custo × 0,5 × preço-sombra da fonte, com a espera como restrição, nunca como desconto de qualidade. O item recebe o mesmo modelo e esforço que receberia em modo síncrono.
+- Só é candidato quando valem **todas** estas condições:
+  - a tarefa é de uma rodada (`tool_intensity` 0 e itens independentes);
+  - a urgência é "quando der": `!lote`, o comando, ou detecção ("para cada…", "todos os…", "à noite");
+  - o prazo permitido é de pelo menos 2 h (senão síncrono);
+  - não há conteúdo sensível;
+  - existe fonte de API disponível.
+- Cada item do lote tem o próprio modelo pela adequação: **um lote pode misturar Haiku, Sonnet e Opus.**
+
+**Tamanho e fluxo dos lotes (adaptados à tarefa):**
+1. **Itens:** a tarefa é decomposta em itens independentes (arquivo, módulo, função). Cada item é analisado (heurística local mais uma chamada barata por grupo).
+2. **Grupos por prefixo compartilhado (Anthropic):** o contexto comum (instruções, trecho do repositório) vai primeiro, com `cache_control` de 1 h, para ser gravado uma vez por grupo. No Gemini o cache não soma, então não precisa agrupar.
+3. **Piloto:** os primeiros `k = clamp(2% de N, 3, 10)` itens vão num lote próprio. Segue-se adiante só se:
+   - o formato do resultado estiver correto e não houver recusa nem erro;
+   - os tokens usados ficarem em até 1,5× o estimado;
+   - uma verificação barata de amostra (opcional, no Haiku) aprovar.
+
+   Se falhar, **para**, mostra o motivo e o que já foi gasto, e não gasta o resto.
+4. **Ondas:** `W = min(limite do provedor, limite de taxa da fila pendente do Workspace, teto de custo da onda ÷ custo estimado do item, itens que cabem no prazo)`.
+   - Padrão: no máximo 500 itens ou US$ 5 por onda, configurável.
+   - As ondas saem em sequência, não todas de uma vez, para o piloto valer e para não estourar o teto de gasto.
+   - Prazo apertado dá ondas menores e mais cedo, com resultado parcial. Prazo folgado dá ondas maiores.
+5. **Acompanhamento:**
+   - Fica no laço de fundo do gateway, que já existe, sondando a cada 1 min no começo e depois a cada 5 min.
+   - Há notificação ao fim de cada onda.
+   - Os resultados vão para `.auto-router/batches/<id>/` (JSONL e um `resumo.md`).
+6. **Falhas:**
+   - Item com erro é reenviado uma vez, em modelo mais forte se o erro foi de qualidade.
+   - Item expirado vai para a próxima onda.
+   - O cancelamento (`ar.mjs batch cancel`) não cobra o que não rodou.
+7. **Retorno ao Claude Code:** se você ativar, ao terminar o gateway retoma a sessão (mesmo mecanismo da Fase 3, `claude --resume`) com "os resultados do lote X estão em …; integre". Senão, só a notificação.
+8. **Custo:** a estimativa (tokens × preço × 0,5) aparece antes de enviar e pede confirmação acima de `batch.confirm_above_usd` (padrão US$ 2). O gasto entra no mesmo livro por fonte, que alimenta o equilíbrio de cotas.
+
+**Pontos de entrada:**
+- **CLI:** `node ar.mjs batch submit|status|results|cancel`.
+- **Servidor MCP local** (stdio, sem rede) com `batch_submit`, `batch_status` e `batch_results`. Assim, quando você diz "revise todos os módulos em lote", o próprio Claude Code monta os itens e envia. O `ar.mjs claude-code on` pergunta antes de instalá-lo.
+- **`/lote`:** uma skill que orienta o modelo a usá-lo.
+- **Gateway:** opção **5** na pergunta de cota esgotada, "enviar como lote (50% mais barato, resposta em até algumas horas)", só quando a tarefa é de uma rodada.
+
+**O que reduz tokens também no modo interativo (sem lote):**
+- O cache de prompt, que já é preservado porque o gateway não reescreve o corpo e só troca de modelo quando compensa.
+- O cache de 1 hora, se você optar por ele no Claude Code.
+- Esforço e modelo adequados (Fase 2A).
+- Explore e tarefas auxiliares no Haiku.
+- As recomendações da Fase 2C (`CLAUDE.md` com o mapa do projeto, ignorar pastas geradas).
+
+**Entregas, nesta ordem:**
+- **B1:** núcleo (armazenamento de jobs, clientes Anthropic e Gemini, piloto e ondas, notificação) e a CLI.
+- **B2:** servidor MCP, `/lote` e retomada da sessão.
+- **B3:** trabalhos internos em lote (cartão do projeto, índice, calibração dos `fit`).
+- **B4:** a opção 5 e a regra "lote contra síncrono" dentro do roteador.
+
+**Depende de você:** uma chave de API do Console com saldo (a da Anthropic) e a do Gemini com crédito. Sem a chave da Anthropic, só o Gemini faz lote.
+
 ## Fase 3: cota do Claude esgotada (pergunta, Gemini ou esperar)
 O recurso é **opcional**. O instalador pergunta: "Ativar a pergunta Gemini/esperar e a retomada automática?". Na sua configuração fica ligado.
 
@@ -303,6 +391,7 @@ Hooks do Claude Code instalados por `ar.mjs claude-code`, a partir de `scripts/h
 
 ## Arquivos principais
 - **Novos:**
+  - `gateway/batch.py`, `gateway/batch_providers.py`, `gateway/mcp_batch.py` (Fase 2D);
   - `gateway/server.py`, `gateway/translate_openai.py`, `gateway/resume.py`;
   - `core/project_context.py` (análise, índice e recomendações), `core/features.py`, `core/classify.py`, `core/score.py`, `core/funding.py` (fontes, ritmo e preço-sombra λ); `config/local/funding.yaml`;
   - `config/presets/*.yaml`;

@@ -174,6 +174,17 @@ Flash now share `fit`; Argon shares Sonnet's (`tools` 4 vs 5). `gemini-4-argon` 
 (HTTP 200, 2.5 s). The tie group is now "equivalent adequacy" only (a cost ratio kept Argon out because it writes ~2x the tokens):
 inside it, expected cost x shadow price decides, so Argon takes Sonnet-level work when the Claude week is tight.
 
+## 2026-11-02 — Batches: what they can and cannot save (research for PLAN 2D)
+Asked for "urgently configuring batch calls". Findings (docs read 2026-11-02): Anthropic Message Batches API 50 % off API price, 100 000
+requests / 256 MB per batch, most done < 1 h, expires at 24 h, results kept 29 days, tools/thinking/vision allowed, no streaming, prompt
+caching stacks best-effort (use the 1-hour TTL), not ZDR-eligible, only `x-api-key` documented (Console key, billed separately);
+Gemini Batch Mode 50 % off, 24 h target / 48 h expiry, OpenAI-compatible endpoint, cache does not stack (limits from a secondary source).
+Consequences: batches are asynchronous and cannot run tools, so they do not fit the interactive agent loop; the discount is on API
+money (Gemini credits, Console balance, Claude extra usage), not on subscription tokens, which have no per-token price. They fit
+single-round deferrable work, the router's own background jobs (project cards, `fit` calibration) and the "plan is out" case. Sources:
+platform.claude.com/docs/en/build-with-claude/batch-processing; developers.googleblog.com (Batch Mode in the Gemini API; Batch API
+with embeddings and OpenAI compatibility).
+
 ## Open items
 - Calibrate `fit` with real tasks (ROUTING.md, "Calibration") and measure the CLI overhead.
 - Confirm in real Copilot Chat that the start of the system prompt is stable across turns (conversation id, SEC-02).
