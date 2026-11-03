@@ -1,3 +1,6 @@
+> **1.0:** besides the flow below (Copilot Chat → LiteLLM → providers), a second, lighter path exists for Claude Code: `gateway/` on
+> `127.0.0.1:4001`, controlled by the umbrella (`ar.mjs on|off|feature`). See `docs/GATEWAY.md`. The two are independent.
+
 # Architecture
 
 ## Goal

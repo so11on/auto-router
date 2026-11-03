@@ -16,6 +16,8 @@
 //   node ar.mjs smoke                   one real request per profile
 //   node ar.mjs logs [-f] [--errors] [--tail N] [--type T]     operation log
 //   node ar.mjs usage [--since 24h|7d|all] [--by model|mode]   token / usage report and quota forecast
+//   node ar.mjs gateway install|uninstall|restart|status         Claude Code gateway as an always-on login service
+//   node ar.mjs claude-code on|off|status                         point Claude Code at the gateway (backup kept)
 import { spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -23,6 +25,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createUmbrella, buildReport, auditContext, DESCRIPTIONS, ORDER } from "./scripts/umbrella.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DATA = path.join(ROOT, "data");
@@ -765,7 +768,7 @@ async function up(flags) {
   if (!flags["no-bridge"]) await bridgeUp();
 }
 async function down() { compose(["down"]); bridgeDown(); }
-async function status() {
+async function legacyStatus() {
   const env0 = readEnv() || {};
   info(`safety: ${env0.SAFETY_MODE || "on"} · sensitive guard: ${env0.SENSITIVE_GUARD || "on"}`);
   const g = await http(`${GATEWAY}/health/liveliness`, { timeout: 3000 });
@@ -1255,8 +1258,290 @@ function usage(flags) {
 }
 
 // ---------------------------------------------------------------- main
+// ---------------------------------------------------------------- 1.0: Claude Code gateway (docs/GATEWAY.md)
+// A light local process (Python + PyYAML in its own venv), always on as a per-user login service; Claude Code reaches it through
+// ANTHROPIC_BASE_URL in ~/.claude/settings.json, so the claude.ai login keeps being used.
+const GW_PORT = 4001;
+const GW_URL = `http://127.0.0.1:${GW_PORT}`;
+const GW_VENV = path.join(HOME_CFG_DIR, "venv");
+const GW_PY = path.join(GW_VENV, IS_WIN ? "Scripts/python.exe" : "bin/python");
+const GW_LABEL = "io.auto-router.gateway";
+const GW_PLIST = path.join(os.homedir(), "Library", "LaunchAgents", `${GW_LABEL}.plist`);
+const GW_UNIT = path.join(os.homedir(), ".config", "systemd", "user", "auto-router-gateway.service");
+const PYYAML = "pyyaml==6.0.3";
+const CLAUDE_SETTINGS = path.join(os.homedir(), ".claude", "settings.json");
+
+function gatewayVenv() {
+  if (fs.existsSync(GW_PY) && run(GW_PY, ["-c", "import yaml"]).status === 0) return true;
+  const py = which("python3") || which("python");
+  if (!py) { bad("Python 3.9+ not found (https://www.python.org/downloads/)"); return false; }
+  info(`creating ${GW_VENV} (Python + ${PYYAML} only)`);
+  if (run(py, ["-m", "venv", GW_VENV]).status !== 0) { bad("python -m venv failed"); return false; }
+  if (run(GW_PY, ["-m", "pip", "install", "-q", PYYAML]).status !== 0) { bad(`pip install ${PYYAML} failed`); return false; }
+  return true;
+}
+
+function xmlEsc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+
+async function gatewayHealthy(timeout = 2000) {
+  const r = await http(`${GW_URL}/health`, { timeout });
+  return r.status === 200;
+}
+
+async function gatewayCmd(flags, rest) {
+  const sub = rest[1] || "status";
+  const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+  // PATH for the service: `claude` (resume after the plan resets) and osascript/notify-send must be found
+  const claudeDir = which("claude") ? path.dirname(which("claude")) : "";
+  const svcPath = [claudeDir, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"].filter(Boolean).join(":");
+  if (sub === "install") {
+    if (!gatewayVenv()) return;
+    fs.mkdirSync(DATA, { recursive: true });
+    const logf = path.join(DATA, "gateway.log");
+    if (process.platform === "darwin") {
+      const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>${GW_LABEL}</string>
+  <key>ProgramArguments</key><array><string>${xmlEsc(GW_PY)}</string><string>${xmlEsc(path.join(ROOT, "gateway", "server.py"))}</string></array>
+  <key>WorkingDirectory</key><string>${xmlEsc(ROOT)}</string>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>${xmlEsc(svcPath)}</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>${xmlEsc(logf)}</string>
+  <key>StandardErrorPath</key><string>${xmlEsc(logf)}</string>
+</dict></plist>
+`;
+      fs.mkdirSync(path.dirname(GW_PLIST), { recursive: true });
+      run("launchctl", ["bootout", `gui/${uid}/${GW_LABEL}`]);
+      fs.writeFileSync(GW_PLIST, plist, { mode: 0o644 });
+      const r = run("launchctl", ["bootstrap", `gui/${uid}`, GW_PLIST]);
+      if (r.status !== 0) return bad(`launchctl bootstrap failed: ${(r.stderr || "").trim()}`);
+    } else if (process.platform === "linux") {
+      const unit = `[Unit]\nDescription=auto-router gateway (Claude Code)\n\n[Service]\nExecStart=${GW_PY} ${path.join(ROOT, "gateway", "server.py")}\nWorkingDirectory=${ROOT}\nEnvironment=PATH=${svcPath}\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n`;
+      fs.mkdirSync(path.dirname(GW_UNIT), { recursive: true });
+      fs.writeFileSync(GW_UNIT, unit);
+      run("systemctl", ["--user", "daemon-reload"]);
+      const r = run("systemctl", ["--user", "enable", "--now", "auto-router-gateway.service"]);
+      if (r.status !== 0) return bad("systemctl --user enable failed");
+    } else {
+      warn("Windows: the login service is not automated yet (not tested). Start it with:");
+      return info(`"${GW_PY}" "${path.join(ROOT, "gateway", "server.py")}"`);
+    }
+    for (let i = 0; i < 20; i++) { await sleep(500); if (await gatewayHealthy()) return ok(`gateway running on ${GW_URL} (starts at login, restarts on failure; log: data/gateway.log)`); }
+    return bad("the gateway did not answer — see data/gateway.log");
+  }
+  if (sub === "uninstall") {
+    if (process.platform === "darwin") { run("launchctl", ["bootout", `gui/${uid}/${GW_LABEL}`]); try { fs.unlinkSync(GW_PLIST); } catch {} }
+    else if (process.platform === "linux") { run("systemctl", ["--user", "disable", "--now", "auto-router-gateway.service"]); try { fs.unlinkSync(GW_UNIT); } catch {} }
+    return ok("gateway service removed (run `node ar.mjs claude-code off` too if Claude Code still points at it)");
+  }
+  if (sub === "restart") {
+    if (process.platform === "darwin") run("launchctl", ["kickstart", "-k", `gui/${uid}/${GW_LABEL}`]);
+    else if (process.platform === "linux") run("systemctl", ["--user", "restart", "auto-router-gateway.service"]);
+    for (let i = 0; i < 20; i++) { await sleep(500); if (await gatewayHealthy()) return ok("gateway restarted"); }
+    return bad("the gateway did not answer — see data/gateway.log");
+  }
+  // status
+  if (!(await gatewayHealthy())) return bad(`gateway not answering on ${GW_URL} — node ar.mjs gateway install`);
+  ok(`gateway answering on ${GW_URL}`);
+  const st = await http(`${GW_URL}/state`, { timeout: 3000 });
+  const s = st.json || {};
+  const w = (s.claude && s.claude.windows) || {};
+  const pct = (x) => (x && x.utilization != null ? `${Math.round(x.utilization * 100)}%` : "?");
+  info(`Claude plan: 5h ${pct(w["5h"])} · 7d ${pct(w["7d"])}${s.claude && s.claude.exhausted ? " · EXHAUSTED until " + new Date(s.claude.until * 1000).toLocaleString() : ""}`);
+  if (s.google && s.google.kind) info(`Google: ${s.google.kind}, ≈ US$ ${Number(s.google.remaining_usd || 0).toFixed(2)} left${s.google.lot_ends ? ", oldest lot ends " + new Date(s.google.lot_ends * 1000).toLocaleDateString() : ""}`);
+  for (const [sid, d] of Object.entries(s.sessions || {}).slice(-5)) info(`session ${sid.slice(0, 8)}: ${d.model} (${d.effort || "-"}) · ${d.task || ""} · ${d.reason}`);
+  if ((s.resume_queue || []).length) info(`resume queued: ${s.resume_queue.map((r) => path.basename(r.cwd) + " at " + new Date(r.at * 1000).toLocaleString()).join(", ")}`);
+}
+
+const MANIFEST = path.join(HOME_CFG_DIR, "installed.json");
+function readManifest() { try { return JSON.parse(fs.readFileSync(MANIFEST, "utf8")); } catch { return {}; } }
+function writeManifest(m) { fs.mkdirSync(HOME_CFG_DIR, { recursive: true }); fs.writeFileSync(MANIFEST, JSON.stringify(m, null, 2)); }
+
+function readClaudeSettings() {
+  try { return JSON.parse(fs.readFileSync(CLAUDE_SETTINGS, "utf8")); } catch (e) { if (fs.existsSync(CLAUDE_SETTINGS)) throw e; return {}; }
+}
+
+async function claudeCodeCmd(flags, rest) {
+  const sub = rest[1] || "status";
+  const s = readClaudeSettings();
+  const env = s.env || {};
+  const on = env.ANTHROPIC_BASE_URL === GW_URL;
+  if (sub === "status") {
+    info(`Claude Code → ${on ? "auto-router gateway (" + GW_URL + ")" : env.ANTHROPIC_BASE_URL ? env.ANTHROPIC_BASE_URL : "Anthropic directly"}`);
+    info(`start model: ${s.model || "(default)"}`);
+    if (on && !(await gatewayHealthy())) bad("the gateway is NOT answering: Claude Code requests will fail — node ar.mjs gateway install, or node ar.mjs claude-code off");
+    return;
+  }
+  if (sub !== "on" && sub !== "off") return bad("usage: node ar.mjs claude-code on|off|status");
+  if (sub === "on" && !flags.force && !(await gatewayHealthy())) return bad("the gateway is not answering — run: node ar.mjs gateway install (or pass --force)");
+  const backup = `${CLAUDE_SETTINGS}.bak-auto-router-${new Date().toISOString().slice(0, 10)}`;
+  if (fs.existsSync(CLAUDE_SETTINGS) && !fs.existsSync(backup)) fs.copyFileSync(CLAUDE_SETTINGS, backup);
+  const next = { ...s, env: { ...env } };
+  if (sub === "on") {
+    next.env.ANTHROPIC_BASE_URL = GW_URL;
+    next.env.CLAUDE_CODE_GATEWAY_HINT_HEADERS = "1";
+    if (!next.model || /opus/i.test(next.model)) { // the gateway's auto_model: requests for it are routed by `auto`
+      const m = readManifest();
+      if (!m.claude_code) writeManifest({ ...m, claude_code: { previous_model: next.model ?? null } });
+      next.model = "sonnet";
+    }
+  } else {
+    if (next.env.ANTHROPIC_BASE_URL === GW_URL) delete next.env.ANTHROPIC_BASE_URL;
+    delete next.env.CLAUDE_CODE_GATEWAY_HINT_HEADERS;
+    const m = readManifest();
+    if (m.claude_code) { // give back the model that was set before `on` (only if it is still the one we set)
+      if (next.model === "sonnet") { if (m.claude_code.previous_model) next.model = m.claude_code.previous_model; else delete next.model; }
+      const { claude_code, ...rest2 } = m; writeManifest(rest2);
+    }
+  }
+  if (!Object.keys(next.env).length) delete next.env;
+  fs.mkdirSync(path.dirname(CLAUDE_SETTINGS), { recursive: true });
+  fs.writeFileSync(CLAUDE_SETTINGS, JSON.stringify(next, null, 2) + "\n", { mode: 0o600 });
+  ok(sub === "on" ? `Claude Code now goes through the gateway (${GW_URL}); new sessions pick it up. Undo: node ar.mjs claude-code off`
+    : "Claude Code talks to Anthropic directly again (new sessions)");
+  info(`backup: ${backup}`);
+}
+
+
+// ---------------------------------------------------------------- v1.0: the umbrella (scripts/umbrella.mjs)
+function companionVsix() {
+  return import("./scripts/build-vsix.mjs").then(({ buildVsix }) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ar-vsix-"));
+    const vsix = path.join(dir, "auto-router-companion.vsix");
+    fs.writeFileSync(vsix, buildVsix());
+    return vsix;
+  });
+}
+function companionInstalled() {
+  try { return fs.readdirSync(path.join(os.homedir(), ".vscode", "extensions")).some((d) => d.startsWith("local.auto-router-companion-")); } catch { return false; }
+}
+async function companionInstall() {
+  const code = findCode();
+  if (!code) { warn("could not find the `code` command; install vscode-extension/auto-router-companion.vsix by hand"); return false; }
+  const r = run(code, ["--install-extension", await companionVsix(), "--force"]);
+  return r.status === 0;
+}
+async function companionUninstall() {
+  const code = findCode();
+  if (code && companionInstalled()) run(code, ["--uninstall-extension", "local.auto-router-companion"]);
+  return true;
+}
+function umbrella() {
+  return createUmbrella({
+    root: ROOT, say: warn,
+    actions: {
+      gatewayInstall: async () => { await gatewayCmd({}, ["gateway", "install"]); return gatewayHealthy(5000); },
+      gatewayUninstall: async () => { await gatewayCmd({}, ["gateway", "uninstall"]); return true; },
+      gatewayHealthy: () => gatewayHealthy(1500),
+      claudeCodeOn: async () => { await claudeCodeCmd({}, ["claude-code", "on"]); return readClaudeSettings().env?.ANTHROPIC_BASE_URL === GW_URL; },
+      claudeCodeOff: async () => { await claudeCodeCmd({}, ["claude-code", "off"]); return true; },
+      companionInstall, companionUninstall, companionInstalled: async () => companionInstalled(),
+      legacyUp: async () => { await up({}); return true; },
+      legacyDown: async () => { await down(); return true; },
+      legacyRunning: async () => (await http(`${GATEWAY}/health/liveliness`, { timeout: 1500 })).status === 200,
+    },
+  });
+}
+// Switching the gateway off from a session that goes THROUGH it cuts that session's own connection (incident 2026-11-02).
+function routedHere(flags) {
+  if (!String(process.env.ANTHROPIC_BASE_URL || "").includes(`:${GW_PORT}`) || flags.force) return false;
+  bad("this terminal/session talks to Anthropic THROUGH the gateway; switching it off here would cut the session itself.");
+  info("Run it from a normal terminal, or pass --force.");
+  return true;
+}
+const mark = (b) => (b ? c(32, "on ") : c(90, "off"));
+async function onCmd(flags) {
+  const res = await umbrella().on();
+  for (const [n, r] of Object.entries(res)) (r === "on" ? ok : warn)(`${n}: ${r}`);
+  if (!Object.keys(res).length) info("the umbrella is on, but no feature is wanted yet: node ar.mjs feature list");
+}
+async function offCmd(flags) {
+  if (routedHere(flags)) return;
+  const res = await umbrella().off();
+  for (const [n, r] of Object.entries(res)) (r === "off" ? ok : warn)(`${n}: ${r}`);
+  ok("auto-router is off; Claude Code talks to Anthropic directly (new sessions). Your choices are kept: node ar.mjs on");
+}
+async function featureCmd(flags, rest) {
+  const u = umbrella(), name = rest[1], val = rest[2];
+  if (!name || name === "list") {
+    const { enabled, rows } = await u.list();
+    info(`umbrella: ${enabled ? "on" : "off"}`);
+    for (const r of rows) console.log(`  ${mark(r.wanted)} ${r.installed ? c(32, "installed") : c(90, "not installed")}  ${r.name.padEnd(21)} ${r.what}`);
+    return;
+  }
+  if (!["on", "off"].includes(val)) return bad("usage: node ar.mjs feature <name> on|off | list");
+  if (val === "off" && ["gateway", "claude_code"].includes(name) && routedHere(flags)) return;
+  try { const r = await u.set(name, val === "on"); (r === "on" || r === "off" ? ok : warn)(`${name}: ${r}`); } catch (e) { bad(e.message); }
+}
+async function modeCmd(rest) {
+  const m = rest[1], file = path.join(ROOT, "config", "local", "gateway.yaml");
+  const st = (await http(`${GW_URL}/state`, { timeout: 2000 })).json || {};
+  if (!m) return info(`mode: ${st.mode || "(gateway not answering)"}   shadow = decide and log, send everything as asked · route = send to the chosen model and effort`);
+  if (!["shadow", "route"].includes(m)) return bad("usage: node ar.mjs mode shadow|route");
+  let text = ""; try { text = fs.readFileSync(file, "utf8"); } catch {}
+  text = /^mode:.*$/m.test(text) ? text.replace(/^mode:.*$/m, `mode: ${m}`) : `mode: ${m}\n${text}`;
+  fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, text);
+  ok(`mode: ${m}`);
+  if (await gatewayHealthy()) await gatewayCmd({}, ["gateway", "restart"]);
+}
+async function reportCmd(flags) {
+  const f = [path.join(DATA, "gateway.jsonl.1"), path.join(DATA, "gateway.jsonl")];
+  const lines = f.flatMap((p) => { try { return fs.readFileSync(p, "utf8").split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean); } catch { return []; } });
+  const span = String(flags.since || "24h"), n = parseFloat(span), ms = n * (span.endsWith("d") ? 86400e3 : span.endsWith("m") ? 60e3 : 3600e3);
+  const r = buildReport(lines, ms);
+  info(`main-loop requests in the last ${span}: ${r.requests}  (shadow ${r.shadow} · routed ${r.route})`);
+  if (!r.requests) return info("nothing yet: use Claude Code with the gateway on.");
+  info(`asked:   ${Object.entries(r.asked).map(([k, v]) => `${k} ${v}`).join(" · ")}`);
+  info(`auto:    ${Object.entries(r.would).map(([k, v]) => `${k} ${v}`).join(" · ")}   (${r.changed} would differ from what was asked)`);
+  info(`effort:  ${Object.entries(r.effort).map(([k, v]) => `${k} ${v}`).join(" · ") || "-"}`);
+  info(`list-price estimate (no cache discount): asked ≈ US$ ${r.estCostAskedUsd.toFixed(2)} → auto ≈ US$ ${(r.estCostAskedUsd - r.estSavingUsd).toFixed(2)}  (saving ≈ ${r.estCostAskedUsd ? Math.round((100 * r.estSavingUsd) / r.estCostAskedUsd) : 0}%)`);
+  if (r.cacheHit != null) info(`prompt-cache hit: ${Math.round(r.cacheHit * 100)}% of input tokens`);
+  if (r.drops) warn(`${r.drops} request(s) arrived far smaller than their session's peak (history or tools lost on the client side)`);
+  if (r.errors) warn(`${r.errors} request(s) were refused or failed upstream`);
+}
+function geminiCmd(rest) {
+  const py = fs.existsSync(GW_PY) ? GW_PY : which("python3") || which("python");
+  if (!py) return bad("Python 3.9+ not found");
+  const r = spawnSync(py, [path.join(ROOT, "gateway", "gemini_cli.py"), ...rest.slice(1)], { stdio: "inherit" });
+  process.exitCode = r.status ?? 1;
+}
+function optimizeCmd() {
+  const { items, tips } = auditContext({});
+  for (const it of items) info(`${it.label}: ${it.lines} lines, ~${it.tokens} tokens (${it.file})`);
+  if (!tips.length) ok("nothing to improve that this audit can see; /usage in Claude Code has more (press f to apply its fixes)");
+  for (const t of tips) warn(t);
+}
+async function statusCmd(flags) {
+  const u = umbrella(), { enabled, rows } = await u.list();
+  info(`auto-router ${fs.readFileSync(path.join(ROOT, "VERSION"), "utf8").trim()} · umbrella ${enabled ? "on" : "off"}`);
+  const g = await http(`${GW_URL}/state`, { timeout: 2000 });
+  if (g.status === 200) {
+    const s = g.json || {}, w = s.claude?.windows || {};
+    const pct = (x) => (x?.utilization != null ? `${Math.round(x.utilization * 100)}%` : "?");
+    ok(`gateway ${GW_URL} · mode ${s.mode} · plan 5h ${pct(w["5h"])} 7d ${pct(w["7d"])}${s.claude?.exhausted ? " · EXHAUSTED" : ""}`);
+    for (const [sid, d] of Object.entries(s.sessions || {}).slice(-3)) info(`session ${sid.slice(0, 8)}: sent ${d.sent?.model || "?"} (${d.sent?.effort || "-"}) · auto ${d.model} (${d.effort || "-"}) · ${d.reason}`);
+  } else bad(`gateway ${GW_URL} not answering`);
+  info(`Claude Code → ${readClaudeSettings().env?.ANTHROPIC_BASE_URL === GW_URL ? "through the gateway" : "Anthropic directly"}`);
+  for (const r of rows) info(`${mark(r.wanted)} ${r.installed ? "installed    " : "not installed"} ${r.name}`);
+  if (rows.find((r) => r.name === "legacy_stack")?.wanted || flags.all) await legacyStatus();
+}
+
 const HELP = `auto-router — node ar.mjs <command>
 
+  on | off    the whole umbrella at once: off always puts Claude Code back on Anthropic directly and removes what was installed
+  feature     list | <name> on|off   switch one part: gateway, claude_code, gemini_tools, token_hooks, haiku_subagents, compact_instructions,
+              terse_style, statusline, vscode_status, resume_on_reset, notifications, legacy_stack
+  status      the umbrella, the gateway, the model and effort in use, the plan
+  mode        [shadow|route]   shadow = decide and log only · route = really send to the chosen model and effort
+  report      [--since 24h|7d]   what routing chose, and what it saves, against what Claude Code asked for
+  gemini      digest|media|research|review|batch ...   Gemini as a tool the Claude calls (reads big things cheaply)
+  optimize    audit context size, MCP servers and hooks for token waste
+
+  gateway     install|uninstall|restart|status   the Claude Code gateway (auto routing) as an always-on login service
+  claude-code on|off|status   point Claude Code at the gateway; off = straight to Anthropic again
   doctor      check Docker, Node, Claude CLI, VS Code, ports
   init        --roots <folders> [--safety on|off] [--profile A-F|auto] [--families claude,openai,copilot,gemini] [--pool yes|no] [--claude cli|api|none] [--openai cli|api|none] [--force]
   keys        [--check] show which keys are set; --check tests each one against its provider
@@ -1294,7 +1579,14 @@ async function main() {
     case "cloudflare-token": return cloudflareToken();
     case "up": return up(flags);
     case "down": return down();
-    case "status": return status();
+    case "status": return statusCmd(flags);
+    case "on": return onCmd(flags);
+    case "off": return offCmd(flags);
+    case "feature": return featureCmd(flags, rest);
+    case "mode": return modeCmd(rest);
+    case "report": return reportCmd(flags);
+    case "gemini": return geminiCmd(rest);
+    case "optimize": return optimizeCmd();
     case "omniroute": return flags.check ? omnirouteCheck() : omniroute(flags);
     case "omniroute-upgrade": return omnirouteUpgrade(flags);
     case "vscode": return vscode(flags);
@@ -1302,6 +1594,8 @@ async function main() {
     case "logs": return logs(flags);
     case "usage": return usage(flags);
     case "tune": return tune(flags);
+    case "gateway": return gatewayCmd(flags, rest);
+    case "claude-code": return claudeCodeCmd(flags, rest);
     default: console.log(HELP); process.exitCode = cmd ? 1 : 0;
   }
 }

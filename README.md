@@ -10,6 +10,23 @@ VS Code Copilot Chat ──► gateway (LiteLLM, Docker) ──► free pool (Gr
                                   └─ DLP + routing  └─► Claude / ChatGPT / Copilot (your logins) or API keys
 ```
 
+## Two doors, both optional (1.0)
+auto-router is an umbrella; every part is off until you turn it on, one by one or all at once:
+```sh
+node ar.mjs feature list        # what exists, what is wanted, what is installed
+node ar.mjs on  |  node ar.mjs off   # everything / nothing (off always puts Claude Code back on Anthropic directly)
+```
+1. **`auto` inside Claude Code** (no Docker, Python + PyYAML, ~35 MB). A small local gateway picks, for every request, the Claude model
+   (Haiku / Sonnet / Opus) and the reasoning effort that the task needs, using your plan so that it does not run out early, and keeps your
+   claude.ai login. It starts in `shadow` mode (decides and logs, sends everything as asked; `node ar.mjs report` shows what it would
+   save) and moves to `route` only when you say so. Gemini is a *tool* the Claude calls to read big things cheaply, never the conversation.
+   Around it: a status line and a VS Code status bar showing `sonnet (medium)`, a hook that cuts test output, a Haiku subagent for verbose
+   work, compaction instructions, an optional terse style, and a context audit. See [docs/GATEWAY.md](docs/GATEWAY.md) and
+   [docs/TOKEN-SAVING.md](docs/TOKEN-SAVING.md). **Read [docs/INCIDENTS.md](docs/INCIDENTS.md) first** (what went wrong on a real install).
+2. **Auto: Free / Balanced / Smart in Copilot Chat** (the earlier stack: LiteLLM + OmniRoute in Docker, the diagram above). Feature `legacy_stack`.
+
+Your own choices (credits, language, models) live in the git-ignored `config/local/`; [examples/](examples/) has generic starting points.
+
 ## Install in 5 minutes (any OS: Windows, macOS, Linux)
 
 **Easiest:** give your AI assistant this link and say *"install this for me"*:
@@ -17,7 +34,7 @@ VS Code Copilot Chat ──► gateway (LiteLLM, Docker) ──► free pool (Gr
 
 **By hand:**
 ```sh
-git clone --branch v0.5.0 https://github.com/so11on/auto-router.git && cd auto-router   # keep this folder OUTSIDE your code folders
+git clone --branch v1.0.0 https://github.com/so11on/auto-router.git && cd auto-router   # keep this folder OUTSIDE your code folders
 node ar.mjs doctor                       # checks Docker, Node, Claude CLI, VS Code
 node ar.mjs init --roots "<your code folder>"       # creates .env with generated secrets (safety mode on by default)
 # put the keys you have into .env — step by step with links: docs/GET-KEYS.md — none are mandatory
@@ -73,17 +90,20 @@ Two switches protect your data (details and limits in [docs/SECURITY.md](docs/SE
 - Everything runs on your computer and listens on `127.0.0.1` only. Your keys stay in `.env` (never committed). The gateway key is also written into VS Code's user file (plain text, loopback-only).
 
 ## Status
-Version 0.5.0 (security hardening + routing v3), developed and verified on **macOS** (2026-10); see [docs/SECURITY-CHANGES.md](docs/SECURITY-CHANGES.md) for what was verified for real and what is pending. The code is written to be portable (Node + Docker, Windows paths and `.cmd` launchers handled) but **Windows and Linux were not
+Version 1.0.0 (the Claude Code gateway and the umbrella on top of routing v3 and the security hardening), developed and verified on **macOS** (2026-10); see [docs/SECURITY-CHANGES.md](docs/SECURITY-CHANGES.md) for what was verified for real and what is pending. The code is written to be portable (Node + Docker, Windows paths and `.cmd` launchers handled) but **Windows and Linux were not
 tested** — `node ar.mjs doctor` and `node ar.mjs smoke` tell you quickly if something is off; please report problems. Free-tier models rotate: `node ar.mjs omniroute` re-tests them.
 
 ## Documentation
-[INSTALL_WITH_AI.md](INSTALL_WITH_AI.md) (AI-driven install) · [UPDATE_WITH_AI.md](UPDATE_WITH_AI.md) (AI-driven update) · [CHANGELOG.md](CHANGELOG.md) · [docs/GET-KEYS.md](docs/GET-KEYS.md) (every key, step by step) · [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/ROUTING.md](docs/ROUTING.md) · [docs/CONFIGURATION.md](docs/CONFIGURATION.md) ·
+[INSTALL_WITH_AI.md](INSTALL_WITH_AI.md) (AI-driven install) · [UPDATE_WITH_AI.md](UPDATE_WITH_AI.md) (AI-driven update) · [CHANGELOG.md](CHANGELOG.md) · [docs/INCIDENTS.md](docs/INCIDENTS.md) (lessons, read before installing) · [docs/TOKEN-SAVING.md](docs/TOKEN-SAVING.md) · [docs/GATEWAY.md](docs/GATEWAY.md) · [docs/ROADMAP.md](docs/ROADMAP.md) · [docs/GET-KEYS.md](docs/GET-KEYS.md) (every key, step by step) · [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/ROUTING.md](docs/ROUTING.md) · [docs/CONFIGURATION.md](docs/CONFIGURATION.md) ·
 [docs/OPERATIONS.md](docs/OPERATIONS.md) · [docs/CLAUDE-BRIDGE.md](docs/CLAUDE-BRIDGE.md) · [docs/FREE-TIER-LIMITS.md](docs/FREE-TIER-LIMITS.md) · [docs/VSCODE-SETUP.md](docs/VSCODE-SETUP.md) ·
 [docs/SECURITY.md](docs/SECURITY.md) · [docs/SECURITY-CHANGES.md](docs/SECURITY-CHANGES.md) · [docs/OMNIROUTE-CONTRACT.md](docs/OMNIROUTE-CONTRACT.md) · [docs/TESTING.md](docs/TESTING.md) · [docs/DECISIONS.md](docs/DECISIONS.md) · [docs/INSTALL-LESSONS.md](docs/INSTALL-LESSONS.md) · [AGENTS.md](AGENTS.md)
 
 ## Layout
 ```
-ar.mjs                    installer and control script (doctor, init, safety, up, down, omniroute, omniroute-upgrade, vscode, smoke, logs, usage, tune, update)
+ar.mjs                    control script: umbrella (on, off, feature, status, mode, report, gemini, optimize), gateway, claude-code, and the older stack (doctor, init, safety, up, down, omniroute, vscode, smoke, logs, usage, tune, update)
+gateway/                  the Claude Code gateway (router, funding, translate_openai, server, gemini_cli) and its defaults
+examples/                 generic and anonymised starting configurations
+templates/claude-code/    what the features install under ~/.claude (skill, hook, subagent, status line, output style)
 docker-compose.yml        gateway (LiteLLM) + OmniRoute
 litellm/                  config.yaml (models, fallbacks), routing.yaml (tables per profile/task), models.yaml (privacy, prices, fit, limits),
                           hook + engine.py (decision), dlp.py, safety.py, pool.py (circuit breaker), quota.py, context.py

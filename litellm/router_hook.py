@@ -27,6 +27,7 @@ import litellm
 import yaml
 from litellm.integrations.custom_logger import CustomLogger
 
+import classify_rules
 import context as ctxmod
 import dlp
 import engine
@@ -63,13 +64,6 @@ BRIDGE_URL = os.environ.get("BRIDGE_URL", "http://host.docker.internal:4100")
 BRIDGE_KEY = os.environ.get("BRIDGE_KEY", "")
 DEFAULT_CONTEXT = {"client_budget": 100000, "output_reserve": 8000, "memory_at": 0.60, "new_chat_at": 0.85,
                    "compact_at": 0.90, "keep_user_turns": 2, "memory_every_messages": 12}
-CHECKPOINT_PROMPT = (
-    "Você avalia um agente de código no meio de uma tarefa. Dado o pedido original e os últimos passos, classifique os PRÓXIMOS passos. "
-    'Responda só JSON: {"task": um de qa|explain_code|codegen|feature|frontend|refactor|debug|test_review|architecture|data|doc_tech|writing|'
-    'research_long|mechanical, "complexity": 1-5, "risk": true|false, "long_output": true|false}. '
-    "mechanical = passo já decidido (aplicar edições conhecidas, ler arquivos, rodar comandos). "
-    "1 = trivial; 3 = mudança em várias etapas numa área; 5 = desenho transversal, debug difícil ou falhas repetidas."
-)
 SUMMARY_PROMPT = (
     "Summarize this part of a coding conversation for another AI that will continue it. Keep: the goal, decisions and "
     "their reasons, files and functions touched, current state, unresolved problems, and the next steps. Be factual "
@@ -78,15 +72,9 @@ SUMMARY_PROMPT = (
 
 VIRTUAL = {"auto-free": "free", "auto-balanced": "balanced", "auto-smart": "smart"}
 TASKS = engine.TASKS
-
-CLASSIFIER_PROMPT = (
-    "Classifique o pedido para um assistente de produto e código. "
-    'Responda só JSON: {"task": um de qa|explain_code|codegen|feature|frontend|refactor|debug|test_review|architecture|data|doc_tech|writing|'
-    'research_long, "complexity": 1-5, '
-    '"risk": true se envolver produção, migração de banco, pagamentos, segurança ou dados pessoais, '
-    '"long_output": true se pedir texto longo}. '
-    "1 = trivial; 3 = mudança em várias etapas numa área; 5 = desenho transversal, debug difícil ou refatoração grande."
-)
+CHECKPOINT_PROMPT = classify_rules.CHECKPOINT_PROMPT
+CLASSIFIER_PROMPT = classify_rules.CLASSIFIER_PROMPT
+_heuristic = classify_rules.heuristic
 
 _sticky: dict = {}  # conv key -> (conversation state dict, ts)
 _last_model: dict = {}
@@ -227,33 +215,6 @@ def _add_handoff_note(data: dict, note: str) -> None:
 def _load_routing() -> dict:
     with open(ROUTING_FILE) as f:
         return yaml.safe_load(f)
-
-
-_HEURISTIC_WORDS = (
-    ("debug", ("bug", "error", "traceback", "fails", "failing", "erro", "falha", "exception", "não funciona")),
-    ("test_review", ("test", "teste", "review", "revis")),
-    ("refactor", ("refactor", "refator", "rename", "cleanup", "migrat", "migr")),
-    ("architecture", ("architecture", "arquitetura", "design", "planej", "plano técnico", "adr")),
-    ("frontend", ("css", "layout", "component", "componente", "tela", "ui ", "botão", "button")),
-    ("data", ("sql", "pandas", "query", "dataframe", "estatíst", "notebook")),
-    ("doc_tech", ("readme", "spec", "prd", "user story", "documentação", "documentacao")),
-    ("writing", ("e-mail", "email", "post", "pitch", "copy", "texto para")),
-    ("feature", ("feature", "funcionalidade", "implement", "implemente")),
-    ("codegen", ("create", "add ", "write", "crie", "função", "function", "script", "regex")),
-    ("research_long", ("todos os arquivos", "all files", "repositório inteiro", "whole repo")),
-)
-
-
-def _heuristic(text: str) -> dict:
-    """Local, free classification (also used when no model may see the text)."""
-    t = text.lower()
-    task = "qa"
-    for name, words in _HEURISTIC_WORDS:
-        if any(w in t for w in words):
-            task = name
-            break
-    complexity = 1 if len(text) < 200 else 2 if len(text) < 800 else 3
-    return {"task": task, "complexity": complexity, "risk": False, "long_output": False, "source": "heuristic"}
 
 
 def _classifier_privacy() -> str:

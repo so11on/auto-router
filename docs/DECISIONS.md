@@ -102,6 +102,92 @@ Two review plans were executed in order; the facts of what was and was not verif
 - **Not implemented from the routing plan:** per-project `.auto-router/policy.yaml`; models without a key / verified id (DeepSeek, xAI Grok, Gemini 4 Argon, Llama 4 Maverick, Codestral) exist in `models.yaml` but not in `config.yaml`; `xhigh` effort is sent as `high`.
 - **A model that answers "credit balance too low" is paused for 6 h** instead of being retried on every request (found when the user's Anthropic API key had no credit and Haiku-by-API was the first choice of several cheap cells).
 
+## 2026-11-02 — 1.0 spike: a local gateway inside Claude Code keeps the subscription
+Plan: route inside Claude Code (the person's real client) instead of Copilot Chat; light, no Docker, 100 % local. `gateway/spike_proxy.py`
+(stdlib only) sat between Claude Code 2.1.304 and `api.anthropic.com`, tested with `claude -p` and the claude.ai login, no API key in the env.
+- **Pass-through works.** Requests arrive with `Authorization: Bearer` (OAuth) and `anthropic-beta` containing `oauth-2025-04-20`; SSE streams
+  flow chunk by chunk. With `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1` every request carries `x-claude-code-request-class` (`auxiliary`, `main`),
+  main turns carry `x-claude-code-prompt-id`, and all carry **`x-claude-code-session-id`** (not in the docs page; makes the resume queue need
+  no hook). Every response carries `anthropic-ratelimit-unified-{5h,7d}-{utilization,reset,status}` plus `representative-claim`,
+  `fallback-percentage` and `overage-status`: the plan's real usage, account-wide.
+- **Rewriting only `model` works and stays on the subscription.** Claude Code asked for `claude-sonnet-5-5`; the proxy sent
+  `claude-haiku-5-5`; the stream's `message_start` said `claude-haiku-5-5`; HTTP 200 with the OAuth bearer. Claude Code's own
+  `modelUsage` / `total_cost_usd` still say Sonnet: they are computed client-side, so the gateway's log is the truth for which model served.
+- **Gotcha:** Claude Code sends `Accept-Encoding: gzip`; adding a lower-case `accept-encoding: identity` next to it still got gzip. Drop every
+  case variant first, or the gateway cannot read the stream (served model, usage, errors).
+- **Gemini can serve Claude Code with tools.** `gateway/translate_openai.py` (Anthropic Messages ↔ OpenAI Chat, stdlib) sent a 6-step
+  tool loop (read, edit, run test, 12 Claude Code tools) to `gemini-3.8-flash` on Gemini's OpenAI endpoint: bug fixed, test passed.
+  Gemini 3 thought signatures are kept per tool-call id; calls it never made carry Google's skip placeholder. ~19 K input tokens per
+  call are Claude Code's fixed system prompt + tools (≈ US$ 0.09 for the whole loop on Flash).
+- **Resume works.** `claude -p "<msg>" --resume <session-id>` continued the same session id on the subscription, and a session whose
+  history was written by Gemini (tool calls, no thinking blocks) was accepted by Opus.
+- **Switching Claude models inside a tool loop works** (Opus → Sonnet with Opus thinking blocks in the history: no "bound to a different
+  conversation" error). Cache cost of a switch, measured: the new model re-writes the conversation part (13 K tokens here); the shared
+  prefix (system + tools, 22 K) was already cached for it; going **back** to the previous model within the cache TTL re-read 35 K from
+  cache and wrote 414. So the gateway must track cache warmth **per model** with its TTL, not only "the current model".
+- **Parameters:** Claude Code always sends `thinking`, `output_config` (effort) and `context_management`. With thinking on, Claude rejects
+  `temperature` and `top_p` (HTTP 400): on Claude the levers are effort / thinking budget and `max_tokens`. Gemini's OpenAI endpoint
+  accepts `reasoning_effort` (low/high) together with `temperature`.
+- **Footprint:** the stdlib proxy uses 25 MB RSS idle, 34 MB after a call, ~0.1 s CPU.
+- **Google AI Pro credits (Billing → Credits export, 2026-11-02):** one "Google Developer Program premium benefit" lot of US$ 10 per
+  month, in local currency, scope "all Google Cloud Platform services". Each lot has its **own end date** in the export, which does not
+  always match "one year after grant" from the FAQ, so the funding model reads the dates per lot from the export or from the user, and
+  never computes them. A Gemini API key on the same billing account was already drawing down the oldest lot, so the credit covers the API.
+- A **Cloud Billing prepayment** on the same account is used only after the credits. In the funding model it is the
+  `prepaid_balance` source, after the per-lot `expiring_credit` sources.
+- **The gateway must always be running**, not started by hand: once Claude Code's `ANTHROPIC_BASE_URL` points at it, a stopped gateway
+  breaks Claude Code everywhere (terminal included). Phase 2 installs it as a per-user login service (LaunchAgent on macOS, systemd user
+  unit on Linux, Task Scheduler on Windows) with restart on failure; `ar.mjs claude-code --off` points Claude Code back at Anthropic.
+  This differs from the 2026-10-20 bridge decision (no LaunchAgent) because the gateway holds no shell and listens on loopback only.
+- Companion extension 0.4.0 adds Explorer → **Add to Claude Code**. Checked by the owner: Shift-drag into Claude Code works for files,
+  not for folders; the menu entry appears only after the new .vsix is installed (`node ar.mjs vscode`, or `code --install-extension`).
+
+## 2026-11-02 — Gateway decision rule: adequacy first, cheapest adequate, balance only as tie-break
+A first version let the plan/credit shadow price multiply cost by up to 5x among every model that merely "passed" an integer fit
+floor, plus a "use the slack" upgrade. The owner rejected it: the quota state was deciding, not the task. The rule now is
+(docs/GATEWAY.md): (1) a continuous adequacy score per model against a requirement built from a richer task analysis
+(reasoning depth, uncertainty, tool intensity, risk, project criticality, failures, learned outcome history); (2) the cheapest
+adequate model; (3) funding balance only between adequate models of equivalent quality and cost; (4) ask only when the adequate
+models are all out of quota. No slack upgrade. An uncertainty margin applies only above 0.3: a 0.1 doubt pushed fit-4 models out
+of a 4.0 requirement and sent medium refactors to Opus.
+- Credit lots get cheaper only inside `horizon_days` (30) of their end date: with no spending history every lot looked like
+  "expiring unused" and priced at 0.
+- **Claude extra usage.** On 2026-11-02 the 5 h window reached `utilization 1.0, status rejected` while requests were still served
+  (`overage-status: allowed`): paid extra usage. The owner keeps it as an emergency reserve (auto-reload with a monthly cap), so the
+  gateway treats the plan as exhausted unless `allow_overage`, also for picker/text pins, and offers it only as an option of the
+  "plan is out" question (`overage: ask`). The owner's four options, fixed numbers: 1 best available now (Gemini), 2 Claude paid
+  extra usage, 3 wait and resume automatically, 4 stop and only notify when the plan is back.
+- The gateway runs from its own venv (Python + PyYAML 6.0.3); the system Python has no PyYAML. 35 MB RSS as a LaunchAgent.
+
+## 2026-11-02 — Model calibration from benchmarks + the owner's experience; Gemini 4 Argon added
+The first gateway table put Gemini Flash level with Sonnet for features (estimated `fit` 4 vs Haiku 2). The owner's experience:
+Haiku ~ Flash (and Flash poor in practice), Gemini Pro below Sonnet, Sonnet ~ Gemini 4 Argon. Checked against current sources:
+- Artificial Analysis Intelligence Index: Opus 5.5 58 (1st), Sonnet 5.5 56, Haiku 5.5 43 at launch (36-38 on index v5),
+  Gemini 3.8 Flash 40-41, Gemini 3.1 Pro preview 30 (artificialanalysis.ai comparisons and the Haiku 5.5 launch article;
+  officechai.com; neuraltrust.ai).
+- Sonnet 5.5 vs Gemini 4 Argon trade wins (Sonnet ahead on terminal and long agentic sessions, cheaper and faster per session;
+  Argon ahead on some repository-scale/agentic benchmarks): benchlm.ai, respan.ai, memeburn.com, bito.ai.
+- Gemini 3.8 Flash: harness-dependent, slow first token (~13 s), up to 30 % more tokens than 3.7 Flash, behind on hard agentic
+  benchmarks (mindstudio.ai, eesel.ai).
+Owner's choices: follow the data for Gemini 3.1 Pro (below Flash), add Argon, and lower Flash by 0.5 (`adequacy_bias`). Haiku and
+Flash now share `fit`; Argon shares Sonnet's (`tools` 4 vs 5). `gemini-4-argon` verified with a real tool call on the billed key
+(HTTP 200, 2.5 s). The tie group is now "equivalent adequacy" only (a cost ratio kept Argon out because it writes ~2x the tokens):
+inside it, expected cost x shadow price decides, so Argon takes Sonnet-level work when the Claude week is tight.
+
+## 2026-11-02 — Batches: what they can and cannot save (research for PLAN 2D)
+Asked for "urgently configuring batch calls". Findings (docs read 2026-11-02): Anthropic Message Batches API 50 % off API price, 100 000
+requests / 256 MB per batch, most done < 1 h, expires at 24 h, results kept 29 days, tools/thinking/vision allowed, no streaming, prompt
+caching stacks best-effort (use the 1-hour TTL), not ZDR-eligible, only `x-api-key` documented (Console key, billed separately);
+Gemini Batch Mode 50 % off, 24 h target / 48 h expiry, OpenAI-compatible endpoint, cache does not stack (limits from a secondary source).
+Consequences: batches are asynchronous and cannot run tools, so they do not fit the interactive agent loop; the discount is on API
+money (Gemini credits, Console balance, Claude extra usage), not on subscription tokens, which have no per-token price. They fit
+single-round deferrable work, the router's own background jobs (project cards, `fit` calibration) and the "plan is out" case. Sources:
+Owner chose the automatic path (the router detects deferrable work and offers a batch, always asking before spending).
+Also found: Claude Code >= 2.1.234 can itself wait for a usage-limit reset and continue (`/rate-limit-options`,
+`autoContinueAtUsageLimit`), and a third-party claim that `claude -p` usage moved to a separate credit pool on 2026-06-15 (unverified).
+Sources: code.claude.com/docs/en/costs; platform.claude.com/docs/en/build-with-claude/batch-processing; developers.googleblog.com (Batch Mode in the Gemini API; Batch API
+with embeddings and OpenAI compatibility).
+
 ## Open items
 - Calibrate `fit` with real tasks (ROUTING.md, "Calibration") and measure the CLI overhead.
 - Confirm in real Copilot Chat that the start of the system prompt is stable across turns (conversation id, SEC-02).
@@ -113,3 +199,18 @@ Two review plans were executed in order; the facts of what was and was not verif
 - Buy Anthropic API credits if the API route is wanted.
 - Consider Arch-Router as a local classifier to cut the ~1-2 s classification latency and the dependency on Google.
 - Measure daily quotas of free providers.
+
+## 2026-11-03 — 1.0: Claude-only `auto`, Gemini as a tool, shadow before route, one umbrella
+Context: the first real install of the gateway made the agent unusable (`docs/INCIDENTS.md`).
+- **Decision:** `auto` chooses among Haiku, Sonnet and Opus and the effort. Gemini never holds the conversation by default; it is the optional
+  classifier and a command the Claude calls (`node ar.mjs gemini`). A command, not an MCP server: it adds nothing to the context until run, works
+  from any client, and the official guidance prefers CLIs to MCP for context cost.
+- **Decision:** `shadow` mode is the repository default and `route` is explicit. A person may start in `route` (the owner did, with the regression
+  tests in place); the report is how anyone judges the gain.
+- **Decision:** one umbrella (`ar.mjs on|off|feature`) over every installed part; `off` is always safe and exact. Defaults are generic and off; personal
+  choices are local; examples are anonymised.
+- **Decision:** the older LiteLLM/OmniRoute stack stays as the optional feature `legacy_stack` (Copilot Chat needs it). Removing Docker entirely means an
+  OpenAI-format input adapter in the gateway for Copilot and Codex: see `docs/ROADMAP.md`.
+- **Honest limit:** the gain of routing is moderate and must be measured. Much can be had by habit (Sonnet by default, `/effort`, Haiku subagents). What
+  only the gateway does: effort per prompt, protecting the 5-hour and weekly windows, waiting and resuming after a reset, spending expiring Gemini credits.
+- **Open question (measure in `report`):** whether changing only `effort` keeps the prompt cache.

@@ -1,0 +1,3 @@
+{"enabled": true, "features": {"gateway": true, "claude_code": true, "gemini_tools": true, "token_hooks": true, "haiku_subagents": true,
+  "compact_instructions": true, "statusline": true, "vscode_status": true, "resume_on_reset": true, "notifications": true,
+  "terse_style": false, "legacy_stack": false}}

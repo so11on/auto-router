@@ -1,0 +1,10 @@
+# Only Claude models are candidates. Gemini stays off. Shadow mode: decisions are logged, requests are sent as made.
+mode: shadow
+models:
+  gemini-flash-lite: {enabled: false}
+  gemini-flash: {enabled: false}
+  gemini-pro: {enabled: false}
+  gemini-argon: {enabled: false}
+funding:
+  claude:
+    overage: never      # paid extra usage is never offered; "ask" offers it as an option when the plan runs out

@@ -1,0 +1,16 @@
+# Claude holds the conversation; Gemini is only a tool (node ar.mjs gemini ...) and, optionally, the cheap classifier.
+mode: shadow
+models:
+  gemini-flash-lite: {enabled: true}
+  gemini-flash: {enabled: true}
+  gemini-pro: {enabled: true}
+classifier:
+  model: ""             # "gemini-flash-lite" to rate prompts with Gemini (a tenth of a cent per prompt) instead of the local heuristic
+funding:
+  claude: {overage: never}
+  google:
+    kind: money
+    currency: USD
+    lots: []            # [{remaining: 10, ends: "2027-01-31"}] from your cloud billing export: the lot that ends first is spent first
+    prepaid: null       # {amount: 10}
+    allow_payg: false   # never charge the card unless you say so

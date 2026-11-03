@@ -9,6 +9,17 @@ auto-router adds three models to VS Code Copilot Chat — **Auto: Free**, **Auto
 for each request, switches model during a task when useful, avoids models that are about to run out of quota, and opens a new chat from a
 memory file when the context is nearly full. Everything runs on the user's computer.
 
+## Read first
+Open [docs/INCIDENTS.md](docs/INCIDENTS.md): what went wrong on a real install and the rules that follow (start in `shadow` mode; verify the model that
+really answers; never switch the gateway off from a session that goes through it; do not run the older Docker stack because "the gateway is down").
+
+## Two things you can install; ask which (or both)
+- **`auto` inside Claude Code** (no Docker): `node ar.mjs gateway install`, then `node ar.mjs feature list`, choose the parts the person wants
+  (`node ar.mjs feature <name> on`), copy a starting config from `examples/` into `config/local/`, then `node ar.mjs on`. Check with
+  `node ar.mjs status` and keep `mode: shadow` for a few days (`node ar.mjs report`) before `node ar.mjs mode route`. Undo anything with
+  `node ar.mjs off` (from a normal terminal).
+- **Auto: Free / Balanced / Smart in Copilot Chat** (needs Docker): the steps below.
+
 ## Rules for you
 1. Use only commands in this file and `node ar.mjs …`. Do **not** edit files outside the cloned folder except what `ar.mjs vscode` does (it backs up first).
 2. **Ask before:** installing software (Docker, Node, Claude CLI), writing VS Code settings, starting anything that stays running, or anything that can cost money.

@@ -1,0 +1,120 @@
+# Claude Code gateway: generic defaults (committed). Your own setup goes in config/local/gateway.yaml (git-ignored), which is
+# merged over this file key by key. docs/ROADMAP.md explains the design; docs/GATEWAY.md how to run it.
+
+listen: {host: 127.0.0.1, port: 4001}
+
+# shadow = decide and log what `auto` WOULD do, but send every request exactly as Claude Code made it (nothing changes for the person;
+#          `node ar.mjs report` shows what routing would have saved). route = actually send it to the chosen model and effort.
+mode: shadow
+
+# Requests that ask for this model are routed by `auto`. Any other Claude model chosen in Claude Code's picker is a pin and is
+# sent as asked. Keep this equal to the model Claude Code starts on (settings.json "model": "sonnet").
+auto_model: claude-sonnet-5-5
+
+# Candidates `auto` may choose. key = model name in litellm/models.yaml (price, fit, tools, privacy, effort table abbr).
+#   upstream: anthropic (pass-through with the claude.ai login) | gemini (translated to Gemini's OpenAI endpoint, GEMINI_API_KEY)
+#   id: the provider's model id (verified by a real call before adding: AGENTS.md invariant 7)
+#   source: which funding source pays (see `funding`)
+models:
+  claude-haiku-cli:  {upstream: anthropic, id: claude-haiku-5-5,  source: claude, roles: [main, auxiliary]}
+  claude-sonnet-cli: {upstream: anthropic, id: claude-sonnet-5-5, source: claude, roles: [main, auxiliary]}
+  claude-opus-cli:   {upstream: anthropic, id: claude-opus-5-5,   source: claude, roles: [main, auxiliary]}
+  # Gemini never takes the conversation of Claude Code (its translation loses thinking, server tools and the prompt cache). It serves
+  # the classifier and the tools the Claude calls (`gemini_tasks`, `node ar.mjs gemini ...`). Add `main` to a model's roles to change that.
+  gemini-flash-lite: {upstream: gemini, id: gemini-3.5-flash-lite, source: google, enabled: false, roles: [classifier, tools]}
+  gemini-flash:      {upstream: gemini, id: gemini-3.8-flash,      source: google, enabled: false, roles: [classifier, tools]}
+  gemini-pro:        {upstream: gemini, id: gemini-3.1-pro-preview, source: google, enabled: false, roles: [tools]}
+  gemini-argon:      {upstream: gemini, id: gemini-4-argon,         source: google, enabled: false, roles: [tools]}   # id verified 2026-11-02
+
+# What each Gemini tool is for (`node ar.mjs gemini <task>`): large inputs the Claude should not read itself, where Gemini is cheap.
+gemini_tasks:
+  digest:   {model: gemini-flash,      what: "read large files, logs or a whole folder and return only a summary or the answer"}
+  media:    {model: gemini-flash,      what: "PDF, image, audio or video the Claude cannot read cheaply"}
+  research: {model: gemini-flash,      what: "web search with sources (Google Search grounding)", grounding: true}
+  batch:    {model: gemini-flash-lite, what: "many small independent jobs (classify, translate, document) through the Batch API at half price"}
+  review:   {model: gemini-pro,        what: "an independent second opinion on a diff"}
+
+# Decision rule (docs/GATEWAY.md): adequacy first; among adequate models the cheapest for this request; plan/credit balance only
+# breaks ties between adequate models of equivalent quality and cost. Scale: the 0-5 `fit` scale of litellm/models.yaml.
+quality:                         # the REQUIREMENT = adjusted complexity + these
+  criticality_offset: {draft: -1, normal: 0, critical: 1}   # from <project>/.auto-router/policy.yaml
+  risk_offset: 0.5               # production, migrations, payments, security, credentials, personal data
+  main_floor: 3                  # the agent's main loop never asks for less than this (a question still carries the whole toolbox)
+  uncertainty_floor: 0.3         # classifier uncertainty (0-1) up to this adds nothing ...
+  uncertainty_margin: 1.0        # ... above it, up to this much at uncertainty 1.0 (the keyword fallback says 0.8: +0.71)
+  failure_step: 1.0              # repeated tool errors or a loop inside the task
+adequacy:                        # a model's ADEQUACY = fit[task] - these penalties + learned history
+  reasoning_gap: 0.75            # per point the task's reasoning depth exceeds the model's `reasoning`
+  tools_gap: 0.5                 # per point of tool reliability below what the task's tool intensity needs (1:3, 2:4, 3:5)
+  context_comfort: 0.5           # above this share of the model's window ...
+  context_penalty: 0.5           # ... this penalty (quality drops in very long contexts)
+  history_min_samples: 5         # outcomes needed before the learned correction (-1 .. +0.25) applies
+tie:                             # the cheapest adequate model and the adequate models of equivalent quality form a tie group;
+  adequacy_delta: 0.5            # inside it, expected cost x shadow price (plan/credit balance) decides ...
+  pressure_lambda: 1.0           # ... except that a source above this shadow price (it will run out before its reset) always loses
+
+# Per-request classes Claude Code announces in x-claude-code-request-class.
+classes:
+  auxiliary: claude-haiku-cli    # titles, summaries, internal classifiers
+  explore: claude-haiku-cli      # the built-in Explore subagent (x-claude-code-agent-type: Explore)
+
+# Mid-task switching (PLAN 2B): reuses litellm/routing.yaml `switching` values unless set here.
+switching:
+  checkpoint_every: 4
+  min_steps_between_switches: 3
+  downgrade_confirmations: 2
+  cache_ttl_s: 300               # Anthropic's default prompt-cache lifetime: a model used within it is "warm"
+
+classifier:
+  model: ""                      # a key of `models` with upstream gemini and the `classifier` role; empty = the local heuristic only
+  max_chars: 4000
+  timeout_s: 8
+
+# Funding sources and their shadow prices (PLAN 3b). Values here are examples of the SHAPE only.
+funding:
+  base: {window_quota: 0.2, expiring_credit: 0.4, prepaid_balance: 0.8, payg: 1.0}
+  rates: {}                      # local currency units per USD, e.g. {BRL: 5.8}
+  claude:
+    kind: window_quota
+    allow_overage: false         # true = paid "extra usage" past the plan limit is used automatically, like any paid source
+    overage: never               # never | ask: offer it as option 2 when the plan is out and only Claude is adequate
+  google:
+    kind: money
+    currency: USD
+    lots: []                     # [{remaining: 10, ends: "2027-01-31"}] from Cloud Console > Billing > Credits (export)
+    prepaid: null                # {amount: 10}
+    allow_payg: false            # never charge the card unless you say so
+    horizon_days: 30             # a lot gets cheaper only in its last N days, in proportion to what would expire unused
+
+# What happens when the Claude plan is used up (PLAN 3).
+on_claude_exhausted:            # only when the ADEQUATE models are all Claude (an adequate Gemini is simply used)
+  ask: true                      # 1 best available now (Gemini) / 2 Claude paid extra usage (if funding.claude.overage: ask)
+                                 # 3 wait and resume automatically / 4 stop, notify when the plan is back
+  resume: true                   # false: option 3 behaves like 4
+  resume_margin_s: 120
+
+# Words that make a reply a continuation ("continue", "yes") or a complaint ("did not work") in YOUR language. Regex fragments, added to the
+# built-in English ones; a continuation inherits the rating of the work in progress instead of being rated on its own.
+patterns:
+  continue_extra: []
+  complaint_extra: []
+
+# Texts the person reads (set your language in config/local/gateway.yaml). Placeholders in {braces} are filled in by the gateway.
+messages:
+  ask_header: "⏸ The Claude plan is out until **{when}**, and the model suited to this task ({task}, complexity {complexity}) is Claude's ({model}). Reply with the number:"
+  ask_option_best: "- **1** — use **{model}** now, the best available (adequacy {adequacy:.1f} for a requirement of {required:.1f}; ≈ US$ {cost:.2f}{left})"
+  ask_left: "; credit left ≈ US$ {left:.2f}"
+  ask_option_overage: "- **2** — use **Claude usage credits** (paid extra usage, your emergency reserve) with {model}"
+  ask_option_wait: "- **3** — wait for the plan to reset ({when}): I resume this session by myself and send a notification"
+  ask_option_stop: "- **4** — stop here: I notify you when the plan is back and you tell me to continue"
+  resume_auto: "⏸ Agreed. I resume this session by myself around **{when}**, when the Claude plan is back, and send a notification. When you reopen the session you will see what was done."
+  resume_notify: "⏹ Stopped. I send a notification when the plan is back (around **{when}**); then just tell me to continue."
+  no_model: "No model can serve this request right now ({reasons})."
+  gemini_notice: "> ℹ️ The Claude plan is out; this simple answer came from {model}.\n\n"
+  resume_prompt: "The Claude plan is back. Continue the task that was interrupted when it ran out, from where it stopped; re-read the files before editing."
+  notify_title: "auto-router"
+  notify_plan_back: "The Claude plan is back. You can tell it to continue in {folder}."
+  notify_resuming: "The Claude plan is back: resuming the session in {folder}"
+  notify_resumed: "Task resumed and finished in {folder}. Open the session to see it."
+  notify_needs_you: "The automatic resume needs you in {folder}."
+  notify_no_claude: "Could not resume the session: claude or the folder was not found."

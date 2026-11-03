@@ -71,5 +71,14 @@ Merges into your `settings.json` (a backup `settings.json.bak-auto-router` is ma
 - `chat.agent.sandbox.enabled: true` (terminal sandbox; macOS, Linux, WSL2 only — skipped on Windows). The documentation also mentions `chat.tools.terminal.sandbox.enabled`; VS Code 1.142 does not contain that name (checked 2026-10-25), so it is not written.
 It never turns on global auto-approve, Autopilot or bypass. `chat.agent.networkFilter` can be managed only by an organisation and is not written. A `settings.json` with comments is not edited by the script (it would lose them): add the keys by hand.
 
-## Status bar (companion extension 0.3.0)
+## Status bar (companion extension 0.4.0)
 `🔒 ` before the model name means safety mode is on; `· 🔒 sensível` at the end means the current conversation holds sensitive data and only allowed models are being used. The extension also tells the bridge which folder this window works in (`~/.auto-router/active-workspace.json`, valid 6 h). After `node ar.mjs update` run `node ar.mjs vscode` and **Developer: Reload Window** to get the new extension.
+
+## Adding files to the Claude Code chat (companion extension 0.4.0)
+The Claude Code extension (2.1.314, checked 2026-11-02) has no Explorer context-menu entry. Ways to attach files:
+- **Drag with Shift held** from the Explorer into the Claude Code prompt box (documented on code.claude.com/docs/en/vs-code). Without Shift, VS Code opens the file instead.
+- **Option+K** (macOS) / **Alt+K** with the editor focused inserts `@file#lines` for the active file and selection.
+- Type `@` and part of a name (folders take a trailing `/`).
+- **Right-click → Add to Claude Code** (this extension, multi-select works): each file is opened in a preview and Claude Code's own
+  `claude-vscode.insertAtMention` is run on it. Folders, or a Claude Code version without that command, are copied as `@path` references
+  to the clipboard and the Claude Code input is focused: paste with Cmd/Ctrl+V.
